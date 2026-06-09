@@ -1,15 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
-
-function hashFile(filePath) {
-  try {
-    const data = fs.readFileSync(filePath);
-    return crypto.createHash('md5').update(data).digest('hex');
-  } catch {
-    return null;
-  }
-}
 
 function scanDirectory(dirPath, driveId, sendProgress) {
   const files = [];
@@ -45,8 +35,7 @@ function scanDirectory(dirPath, driveId, sendProgress) {
             path: fullPath,
             size: stat.size,
             ext,
-            modified_at: stat.mtime.toISOString(),
-            hash: null   // hashing is deferred — caller decides which files need it
+            modified_at: stat.mtime.toISOString()
           });
 
           if (files.length % 100 === 0) {
@@ -63,4 +52,4 @@ function scanDirectory(dirPath, driveId, sendProgress) {
   return { files, folders, folderCount };
 }
 
-module.exports = { hashFile, scanDirectory };
+module.exports = { scanDirectory };

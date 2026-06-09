@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { hashFile, scanDirectory } = require('./scanner');
+const { scanDirectory } = require('./scanner');
 
 let mainWindow;
 let db;
@@ -45,7 +45,6 @@ function runMigrations() {
     )
   `);
   try { db.run('ALTER TABLE drives ADD COLUMN description TEXT DEFAULT ""'); } catch {}
-  try { db.run('ALTER TABLE drives ADD COLUMN dup_scanned_at TEXT DEFAULT NULL'); } catch {}
 
   db.run(`
     CREATE TABLE IF NOT EXISTS files (
@@ -134,105 +133,6 @@ ipcMain.handle('update-drive-label', (_, { driveId, label, color, description })
   return { ok: true };
 });
 
-ipcMain.handle('get-duplicates', () => {
-  const stmt = db.prepare(`
-    SELECT f.hash, f.name, f.size, f.path, f.modified_at, f.drive_id,
-           d.name as drive_name, d.label as drive_label, d.color as drive_color
-    FROM files f
-    JOIN drives d ON f.drive_id = d.id
-    WHERE f.hash IS NOT NULL
-      AND f.hash IN (
-        SELECT hash FROM files WHERE hash IS NOT NULL GROUP BY hash HAVING COUNT(*) > 1
-      )
-    ORDER BY f.hash, f.drive_id
-  `);
-  const rows = [];
-  while (stmt.step()) rows.push(stmt.getAsObject());
-  stmt.free();
-
-  const hashGroups = {};
-  for (const row of rows) {
-    if (!hashGroups[row.hash]) hashGroups[row.hash] = [];
-    hashGroups[row.hash].push(row);
-  }
-  const fileGroups = Object.values(hashGroups);
-
-  // ── Folder-level grouping ─────────────────────────────────────────────────
-  // Build a map of (driveId, parentDir) → { hashes, dupFileCount, driveInfo }
-  const sep = path.sep;
-  const dirMap = {};
-  for (const group of fileGroups) {
-    for (const file of group) {
-      const parentDir = path.dirname(file.path);
-      const key = `${file.drive_id}::${parentDir}`;
-      if (!dirMap[key]) {
-        dirMap[key] = {
-          driveId: file.drive_id,
-          dirPath: parentDir,
-          dirName: path.basename(parentDir),
-          driveName: file.drive_name,
-          driveLabel: file.drive_label,
-          driveColor: file.drive_color,
-          hashes: new Set(),
-          dupFileCount: 0
-        };
-      }
-      dirMap[key].hashes.add(file.hash);
-      dirMap[key].dupFileCount++;
-    }
-  }
-
-  // Identify fully-duplicated dirs: every direct child is in a dup group
-  const fullyDupKeys = new Set();
-  for (const [key, info] of Object.entries(dirMap)) {
-    const prefix = info.dirPath + sep;
-    // Count direct children: match prefix + something, but no additional separator
-    const countStmt = db.prepare(
-      `SELECT COUNT(*) as c FROM files WHERE drive_id = ? AND path LIKE ? AND path NOT LIKE ?`
-    );
-    countStmt.bind([info.driveId, prefix + '%', prefix + '%' + sep + '%']);
-    countStmt.step();
-    const directCount = countStmt.getAsObject().c;
-    countStmt.free();
-    if (directCount > 0 && directCount === info.dupFileCount) {
-      fullyDupKeys.add(key);
-    }
-  }
-
-  // Group fully-dup dirs by their hash signature — matching dirs have the same set of hashes
-  const bySig = {};
-  for (const key of fullyDupKeys) {
-    const info = dirMap[key];
-    const sig = [...info.hashes].sort().join(',');
-    if (!bySig[sig]) bySig[sig] = [];
-    bySig[sig].push(info);
-  }
-
-  const folderGroups = [];
-  const coveredHashes = new Set();
-
-  for (const dirs of Object.values(bySig)) {
-    if (dirs.length < 2) continue;
-    const hashes = dirs[0].hashes;
-    folderGroups.push({
-      fileCount: hashes.size,
-      dirs: dirs.map(d => ({
-        driveId: d.driveId,
-        dirPath: d.dirPath,
-        dirName: d.dirName,
-        driveName: d.driveName,
-        driveLabel: d.driveLabel,
-        driveColor: d.driveColor
-      }))
-    });
-    for (const h of hashes) coveredHashes.add(h);
-  }
-
-  // Only return file groups not already covered by a folder group
-  const remainingFileGroups = fileGroups.filter(g => !coveredHashes.has(g[0].hash));
-
-  return { fileGroups: remainingFileGroups, folderGroups };
-});
 
 ipcMain.handle('search-files', (_, query) => {
   const like = `%${query}%`;
@@ -287,12 +187,66 @@ ipcMain.handle('get-stats', () => {
   const driveCount = db.exec('SELECT COUNT(*) as c FROM drives')[0]?.values[0][0] || 0;
   const fileCount = db.exec('SELECT COUNT(*) as c FROM files')[0]?.values[0][0] || 0;
   const totalSize = db.exec('SELECT SUM(size) as s FROM files')[0]?.values[0][0] || 0;
-  const dupCount = db.exec(`
-    SELECT COUNT(*) FROM files WHERE hash IN (
-      SELECT hash FROM files WHERE hash IS NOT NULL GROUP BY hash HAVING COUNT(*) > 1
-    )
-  `)[0]?.values[0][0] || 0;
-  return { driveCount, fileCount, totalSize, dupCount };
+  return { driveCount, fileCount, totalSize };
+});
+
+ipcMain.handle('rescan-drive', async (event, driveId) => {
+  const sendProgress = (msg) => mainWindow.webContents.send('scan-progress', msg);
+
+  const driveStmt = db.prepare('SELECT * FROM drives WHERE id = ?');
+  driveStmt.bind([driveId]);
+  if (!driveStmt.step()) { driveStmt.free(); return { ok: false }; }
+  const drive = driveStmt.getAsObject();
+  driveStmt.free();
+
+  const folderPath = drive.path;
+  const driveName = drive.label || drive.name;
+
+  let totalSize = 0, usedSize = 0;
+  try {
+    const stat = fs.statfsSync(folderPath);
+    totalSize = stat.bsize * stat.blocks;
+    usedSize = stat.bsize * (stat.blocks - stat.bfree);
+  } catch {}
+
+  sendProgress('Loading previous catalog…');
+  const oldStmt = db.prepare('SELECT path FROM files WHERE drive_id = ?');
+  oldStmt.bind([driveId]);
+  const oldPaths = new Set();
+  while (oldStmt.step()) oldPaths.add(oldStmt.getAsObject().path);
+  oldStmt.free();
+
+  const { files, folders, folderCount } = scanDirectory(folderPath, driveId, sendProgress);
+
+  sendProgress('Comparing with previous catalog…');
+  const newPaths = new Set(files.map(f => f.path));
+  const added = [...newPaths].filter(p => !oldPaths.has(p)).length;
+  const removed = [...oldPaths].filter(p => !newPaths.has(p)).length;
+
+  sendProgress(`Saving ${files.length} files to database…`);
+  db.run('DELETE FROM files WHERE drive_id = ?', [driveId]);
+  db.run('DELETE FROM folders WHERE drive_id = ?', [driveId]);
+
+  const insert = db.prepare('INSERT INTO files (drive_id, name, path, size, ext, modified_at) VALUES (?, ?, ?, ?, ?, ?)');
+  for (const f of files) {
+    insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at]);
+  }
+  insert.free();
+
+  const folderInsert = db.prepare('INSERT INTO folders (drive_id, name, path) VALUES (?, ?, ?)');
+  for (const fo of folders) {
+    folderInsert.run([fo.drive_id, fo.name, fo.path]);
+  }
+  folderInsert.free();
+
+  db.run(
+    'UPDATE drives SET file_count = ?, folder_count = ?, used_size = ?, total_size = ?, scanned_at = ? WHERE id = ?',
+    [files.length, folderCount, usedSize, totalSize, new Date().toISOString(), driveId]
+  );
+
+  saveDB();
+  sendProgress('Done!');
+  return { ok: true, isUpdate: true, driveName, fileCount: files.length, added, removed, driveId };
 });
 
 ipcMain.handle('scan-folder', async (event) => {
@@ -344,10 +298,10 @@ ipcMain.handle('scan-folder', async (event) => {
     db.run('DELETE FROM folders WHERE drive_id = ?', [existingDriveId]);
 
     const insert = db.prepare(
-      'INSERT INTO files (drive_id, name, path, size, ext, modified_at, hash) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO files (drive_id, name, path, size, ext, modified_at) VALUES (?, ?, ?, ?, ?, ?)'
     );
     for (const f of files) {
-      insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at, f.hash]);
+      insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at]);
     }
     insert.free();
 
@@ -381,10 +335,10 @@ ipcMain.handle('scan-folder', async (event) => {
   sendProgress(`Saving ${files.length} files to database…`);
 
   const insert = db.prepare(
-    'INSERT INTO files (drive_id, name, path, size, ext, modified_at, hash) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO files (drive_id, name, path, size, ext, modified_at) VALUES (?, ?, ?, ?, ?, ?)'
   );
   for (const f of files) {
-    insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at, f.hash]);
+    insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at]);
   }
   insert.free();
 
@@ -402,55 +356,13 @@ ipcMain.handle('scan-folder', async (event) => {
   return { ok: true, isUpdate: false, driveName, fileCount: files.length, driveId };
 });
 
-ipcMain.handle('scan-duplicates', async (event, driveId) => {
-  const sendProgress = (msg) => mainWindow.webContents.send('scan-progress', msg);
-  const HASH_LIMIT = 500 * 1024 * 1024;
 
-  // Load all files for this drive from the DB
-  const fileStmt = db.prepare('SELECT id, path, size FROM files WHERE drive_id = ?');
-  fileStmt.bind([driveId]);
-  const files = [];
-  while (fileStmt.step()) files.push(fileStmt.getAsObject());
-  fileStmt.free();
-
-  // Sizes already stored for other drives
-  const sizeStmt = db.prepare(
-    'SELECT DISTINCT size FROM files WHERE drive_id != ? AND size IS NOT NULL AND size > 0'
-  );
-  sizeStmt.bind([driveId]);
-  const dbSizes = new Set();
-  while (sizeStmt.step()) dbSizes.add(sizeStmt.getAsObject().size);
-  sizeStmt.free();
-
-  // Intra-drive size frequency
-  const scanSizeCount = new Map();
-  for (const f of files) {
-    if (f.size > 0 && f.size < HASH_LIMIT) {
-      scanSizeCount.set(f.size, (scanSizeCount.get(f.size) || 0) + 1);
-    }
-  }
-
-  const candidates = files.filter(
-    f => f.size > 0 && f.size < HASH_LIMIT &&
-         (scanSizeCount.get(f.size) > 1 || dbSizes.has(f.size))
-  );
-
-  if (candidates.length > 0) {
-    sendProgress(`Hashing ${candidates.length} of ${files.length} files…`);
-    let done = 0;
-    const updateStmt = db.prepare('UPDATE files SET hash = ? WHERE id = ?');
-    for (const f of candidates) {
-      const hash = hashFile(f.path);
-      if (hash !== null) updateStmt.run([hash, f.id]);
-      done++;
-      if (done % 50 === 0) sendProgress(`Hashing… ${done} / ${candidates.length}`);
-    }
-    updateStmt.free();
-  }
-
-  db.run('UPDATE drives SET dup_scanned_at = ? WHERE id = ?', [new Date().toISOString(), driveId]);
+ipcMain.handle('clear-database', () => {
+  db.run('DELETE FROM files');
+  db.run('DELETE FROM folders');
+  db.run('DELETE FROM drives');
   saveDB();
-  return { ok: true, candidateCount: candidates.length };
+  return { ok: true };
 });
 
 ipcMain.handle('get-db-path', () => DB_PATH);

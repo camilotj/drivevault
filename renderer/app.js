@@ -35,7 +35,7 @@ function extIcon(ext) {
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 
-const views = ['dashboard', 'drives', 'duplicates', 'search', 'settings'];
+const views = ['dashboard', 'drives', 'search', 'settings'];
 
 document.querySelectorAll('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -47,7 +47,6 @@ document.querySelectorAll('.nav-item').forEach(btn => {
 function switchView(name) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === name));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`));
-  if (name === 'duplicates') loadDuplicates();
   if (name === 'drives') loadDrivesView();
   if (name === 'search') document.getElementById('search-input').focus();
   if (name === 'settings') loadSettings();
@@ -63,10 +62,7 @@ async function loadDashboard() {
 
   document.getElementById('stat-drives').textContent = formatNum(stats.driveCount);
   document.getElementById('stat-size').textContent = formatBytes(stats.totalSize);
-  document.getElementById('stat-dups').textContent = formatNum(stats.dupCount);
-
   document.getElementById('drives-badge').textContent = stats.driveCount || '';
-  document.getElementById('dup-badge').textContent = stats.dupCount || '';
 
   const container = document.getElementById('drive-cards');
   const empty = document.getElementById('empty-state');
@@ -91,7 +87,6 @@ async function loadDashboard() {
           <div class="drive-status-badge ${d.connected ? 'status-connected' : 'status-offline'}">
             <span class="status-dot"></span>${d.connected ? 'Connected' : 'Offline'}
           </div>
-          ${!d.dup_scanned_at ? `<div class="dup-pending-badge" onclick="event.stopPropagation(); startDupScan(${d.id})">No dup scan</div>` : ''}
         </div>
         <div class="drive-card-name">${label}</div>
         <div class="drive-card-path">${d.path}</div>
@@ -112,29 +107,6 @@ async function loadDashboard() {
   }).join('');
 }
 
-async function startDupScan(driveId) {
-  resetScanModal();
-  document.getElementById('scan-status').textContent = 'Starting duplicate scan…';
-  document.getElementById('scan-overlay').classList.remove('hidden');
-
-  window.api.onScanProgress((msg) => {
-    document.getElementById('scan-status').textContent = msg;
-  });
-
-  await window.api.scanDuplicates(driveId);
-  window.api.removeScanProgress();
-
-  document.getElementById('scan-spinner').classList.add('hidden');
-  document.getElementById('scan-status').textContent = '';
-  document.getElementById('scan-result').innerHTML = `
-    <div class="scan-result-icon">✓</div>
-    <div class="scan-result-title">Duplicate scan complete</div>
-  `;
-  document.getElementById('scan-result').classList.remove('hidden');
-  document.getElementById('scan-done-btn').classList.remove('hidden');
-
-  await loadDashboard();
-}
 
 // ── Drives view ───────────────────────────────────────────────────────────────
 
@@ -174,6 +146,7 @@ async function loadDrivesView() {
           </div>
         </div>
         <div class="drive-row-actions">
+          ${d.connected ? `<button class="btn-ghost" onclick="rescanDrive(${d.id})">Rescan</button>` : ''}
           <button class="btn-ghost" onclick="openEditModal(${d.id})">Edit</button>
           <button class="btn-ghost" onclick="openDriveModal(${d.id})">Browse</button>
           <button class="btn-ghost danger" onclick="deleteDrive(${d.id}, '${label.replace(/'/g, "\\'")}')">Remove</button>
@@ -189,138 +162,26 @@ async function deleteDrive(id, name) {
   await Promise.all([loadDashboard(), loadDrivesView()]);
 }
 
-// ── Duplicates view ───────────────────────────────────────────────────────────
+async function rescanDrive(driveId) {
+  resetScanModal();
+  document.getElementById('scan-overlay').classList.remove('hidden');
 
-let _dupFolderGroups = [];
+  window.api.onScanProgress((msg) => {
+    document.getElementById('scan-status').textContent = msg;
+  });
 
-async function loadDuplicates() {
-  const { fileGroups, folderGroups } = await window.api.getDuplicates();
-  _dupFolderGroups = folderGroups;
-  const drives = await window.api.getDrives();
-  const driveMap = Object.fromEntries(drives.map(d => [d.id, d]));
+  const result = await window.api.rescanDrive(driveId);
+  window.api.removeScanProgress();
 
-  const container = document.getElementById('duplicates-list');
-  const empty = document.getElementById('dup-empty');
-  const label = document.getElementById('dup-count-label');
-
-  const totalGroups = fileGroups.length + folderGroups.length;
-  if (!totalGroups) {
-    container.innerHTML = '';
-    empty.classList.remove('hidden');
-    label.textContent = '';
+  if (!result || !result.ok) {
+    document.getElementById('scan-overlay').classList.add('hidden');
     return;
   }
 
-  empty.classList.add('hidden');
-  const parts = [];
-  if (folderGroups.length) parts.push(`${folderGroups.length} folder${folderGroups.length === 1 ? '' : 's'}`);
-  if (fileGroups.length)   parts.push(`${fileGroups.length} file group${fileGroups.length === 1 ? '' : 's'}`);
-  label.textContent = parts.join(' · ');
-
-  let html = '';
-
-  // ── Folder groups ────────────────────────────────────────────────────────
-  folderGroups.forEach((fg, i) => {
-    const dirName = fg.dirs[0].dirName || 'folder';
-    html += `
-      <div class="dup-group dup-folder-group">
-        <div class="dup-group-header" onclick="toggleDupFolder(${i})">
-          <div class="dup-folder-icon">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-          </div>
-          <div class="dup-group-name">${dirName}/</div>
-          <div class="dup-group-size">${formatNum(fg.fileCount)} files</div>
-          <div class="dup-group-count">${fg.dirs.length} copies</div>
-          <div class="dup-folder-chevron" id="dup-folder-chevron-${i}">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
-          </div>
-        </div>
-        ${fg.dirs.map(d => `
-          <div class="dup-file">
-            <div class="dup-drive-dot" style="background: ${d.driveColor || '#666'}"></div>
-            <div class="dup-drive-name">${d.driveLabel || d.driveName}</div>
-            <div class="dup-file-path">${d.dirPath}</div>
-          </div>
-        `).join('')}
-        <div class="dup-folder-contents hidden" id="dup-folder-contents-${i}">
-          <div class="dup-folder-contents-inner"></div>
-        </div>
-      </div>
-    `;
-  });
-
-  // ── File groups ──────────────────────────────────────────────────────────
-  fileGroups.forEach((group, i) => {
-    const first = group[0];
-    html += `
-      <div class="dup-group">
-        <div class="dup-group-header" onclick="toggleDupFileDetail(${folderGroups.length + i})">
-          <div class="dup-group-name">${first.name}</div>
-          <div class="dup-group-size">${formatBytes(first.size)}</div>
-          <div class="dup-group-count">${group.length} copies</div>
-        </div>
-        ${group.map(f => {
-          const d = driveMap[f.drive_id] || {};
-          const mod = f.modified_at ? new Date(f.modified_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
-          return `
-            <div class="dup-file">
-              <div class="dup-drive-dot" style="background: ${d.color || '#666'}"></div>
-              <div class="dup-drive-name">${d.label || d.name || 'Unknown'}</div>
-              <div class="dup-file-path">${f.path}</div>
-              <div class="dup-file-detail hidden">
-                <span class="dup-detail-item">Modified ${mod}</span>
-                <span class="dup-detail-item dup-hash">${f.hash}</span>
-              </div>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    `;
-  });
-
-  container.innerHTML = html;
-}
-
-async function toggleDupFolder(index) {
-  const contents = document.getElementById(`dup-folder-contents-${index}`);
-  const chevron  = document.getElementById(`dup-folder-chevron-${index}`);
-  const isHidden = contents.classList.contains('hidden');
-
-  chevron.classList.toggle('rotated', isHidden);
-  contents.classList.toggle('hidden', !isHidden);
-
-  if (!isHidden || contents.dataset.loaded) return;
-  contents.dataset.loaded = '1';
-
-  const fg = _dupFolderGroups[index];
-  if (!fg) return;
-
-  const inner = contents.querySelector('.dup-folder-contents-inner');
-  inner.innerHTML = '<div class="dup-folder-loading">Loading…</div>';
-
-  const files = await window.api.getFolderFiles(fg.dirs[0].driveId, fg.dirs[0].dirPath);
-
-  if (!files.length) {
-    inner.innerHTML = '<div class="dup-folder-loading">No files found.</div>';
-    return;
-  }
-
-  inner.innerHTML = files.map(f => {
-    const { cls } = extIcon(f.ext);
-    return `
-      <div class="dup-folder-file">
-        <span class="search-result-icon ${cls}" style="font-size:11px;width:24px;height:24px;flex-shrink:0">${f.ext || '?'}</span>
-        <span class="dup-folder-file-name">${f.name}</span>
-        <span class="dup-folder-file-size">${formatBytes(f.size)}</span>
-      </div>
-    `;
-  }).join('');
-}
-
-function toggleDupFileDetail(groupIndex) {
-  const group = document.querySelectorAll('.dup-group')[groupIndex];
-  if (!group) return;
-  group.querySelectorAll('.dup-file-detail').forEach(el => el.classList.toggle('hidden'));
+  await loadDashboard();
+  loadDrivesView();
+  showScanResultSummary(result);
+  document.getElementById('scan-done-btn').classList.remove('hidden');
 }
 
 // ── Drive detail modal ────────────────────────────────────────────────────────
@@ -349,7 +210,7 @@ async function openDriveModal(driveId) {
   document.getElementById('drive-modal').classList.remove('hidden');
 
   const files = await window.api.getDriveFiles(driveId);
-  renderFileTree(files, drive.path);
+  renderFileTree(files, drive.path, drive.connected);
 }
 
 document.getElementById('drive-modal-close').addEventListener('click', () => {
@@ -362,7 +223,7 @@ document.getElementById('drive-modal').addEventListener('click', (e) => {
   }
 });
 
-function renderFileTree(files, rootPath) {
+function renderFileTree(files, rootPath, connected) {
   // Build tree structure
   const tree = {};
 
@@ -377,7 +238,7 @@ function renderFileTree(files, rootPath) {
     }
     const fileName = parts[parts.length - 1];
     if (!node.__files) node.__files = [];
-    node.__files.push({ name: fileName, size: f.size, ext: f.ext });
+    node.__files.push({ name: fileName, size: f.size, ext: f.ext, path: f.path });
   }
 
   function renderNode(node, depth = 0) {
@@ -407,11 +268,17 @@ function renderFileTree(files, rootPath) {
     const ffiles = node.__files || [];
     for (const f of ffiles.sort((a, b) => a.name.localeCompare(b.name))) {
       const { cls } = extIcon(f.ext);
+      const revealBtn = connected && f.path
+        ? `<button class="tree-file-reveal" title="Show in Explorer" data-path="${f.path.replace(/"/g, '&quot;')}" onclick="event.stopPropagation(); revealFile(this)">
+             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+           </button>`
+        : '';
       html += `
         <div class="tree-file">
           <span class="${cls}" style="font-size:11px;width:16px;text-align:center">${f.ext || '?'}</span>
           <span>${f.name}</span>
           <span class="tree-file-size">${formatBytes(f.size)}</span>
+          ${revealBtn}
         </div>
       `;
     }
@@ -428,6 +295,10 @@ function renderFileTree(files, rootPath) {
   }
 
   document.getElementById('file-tree').innerHTML = renderNode(tree);
+}
+
+function revealFile(btn) {
+  window.api.showItemInFolder(btn.dataset.path);
 }
 
 // ── Edit Drive modal ──────────────────────────────────────────────────────────
@@ -485,6 +356,14 @@ document.getElementById('edit-save').addEventListener('click', async () => {
 
 // ── Search ────────────────────────────────────────────────────────────────────
 
+document.getElementById('dashboard-search-input').addEventListener('input', (e) => {
+  const q = e.target.value;
+  const searchInput = document.getElementById('search-input');
+  searchInput.value = q;
+  switchView('search');
+  searchInput.dispatchEvent(new Event('input'));
+});
+
 let searchTimeout;
 document.getElementById('search-input').addEventListener('input', (e) => {
   clearTimeout(searchTimeout);
@@ -497,13 +376,22 @@ document.getElementById('search-input').addEventListener('input', (e) => {
 });
 
 async function runSearch(query) {
-  const { files, folders } = await window.api.searchFiles(query);
+  const [{ files, folders }, drives] = await Promise.all([
+    window.api.searchFiles(query),
+    window.api.getDrives()
+  ]);
+  const connectedDrives = new Set(drives.filter(d => d.connected).map(d => d.id));
   const container = document.getElementById('search-results');
 
   if (!files.length && !folders.length) {
     container.innerHTML = `<p style="color:var(--text3);padding:16px 0">No results for "${query}"</p>`;
     return;
   }
+
+  const revealBtn = (path) =>
+    `<button class="search-result-reveal" title="Show in Explorer" data-path="${path.replace(/"/g, '&quot;')}" onclick="event.stopPropagation(); revealFile(this)">
+       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+     </button>`;
 
   let html = '';
 
@@ -522,6 +410,7 @@ async function runSearch(query) {
             ${fo.drive_label || fo.drive_name}
           </div>
         </div>
+        ${connectedDrives.has(fo.drive_id) ? revealBtn(fo.path) : ''}
         <div class="folder-chevron">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
         </div>
@@ -546,6 +435,7 @@ async function runSearch(query) {
             </div>
           </div>
           <div class="search-result-meta">${formatBytes(f.size)}</div>
+          ${connectedDrives.has(f.drive_id) ? revealBtn(f.path) : ''}
         </div>
       `;
     }).join('');
@@ -620,23 +510,19 @@ async function importDb() {
   loadDrivesView();
 }
 
-// ── Export ────────────────────────────────────────────────────────────────────
-
-function toggleExportMenu() {
-  const menu = document.getElementById('export-menu');
-  menu.classList.toggle('hidden');
+async function clearDatabase() {
+  if (!confirm('This will permanently delete all drives and files from the catalog. The database file will be kept but emptied. Continue?')) return;
+  await window.api.clearDatabase();
+  showToast('Database cleared');
+  await loadDashboard();
+  loadDrivesView();
 }
 
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('.export-menu-wrap')) {
-    document.getElementById('export-menu')?.classList.add('hidden');
-  }
-});
+// ── Export ────────────────────────────────────────────────────────────────────
 
 const exportFns = { csv: 'exportCsv', json: 'exportJson', html: 'exportHtml' };
 
 async function runExport(format) {
-  document.getElementById('export-menu').classList.add('hidden');
   const result = await window.api[exportFns[format]]();
   if (result?.ok) showToast(`Exported ${format.toUpperCase()} — ${result.filePath}`);
 }
@@ -655,13 +541,10 @@ function showToast(msg) {
 
 // ── Scan flow ─────────────────────────────────────────────────────────────────
 
-let _pendingDupDriveId = null;
-
 function resetScanModal() {
   document.getElementById('scan-spinner').classList.remove('hidden');
   document.getElementById('scan-status').textContent = 'Scanning…';
   document.getElementById('scan-result').classList.add('hidden');
-  document.getElementById('dup-prompt').classList.add('hidden');
   document.getElementById('scan-done-btn').classList.add('hidden');
 }
 
@@ -710,33 +593,10 @@ document.getElementById('scan-btn').addEventListener('click', async () => {
   loadDrivesView();
 
   showScanResultSummary(result);
-  _pendingDupDriveId = result.driveId;
-  document.getElementById('dup-prompt').classList.remove('hidden');
-});
-
-document.getElementById('dup-scan-btn').addEventListener('click', async () => {
-  document.getElementById('dup-prompt').classList.add('hidden');
-  document.getElementById('scan-spinner').classList.remove('hidden');
-  document.getElementById('scan-status').textContent = 'Starting duplicate scan…';
-
-  window.api.onScanProgress((msg) => {
-    document.getElementById('scan-status').textContent = msg;
-  });
-
-  await window.api.scanDuplicates(_pendingDupDriveId);
-  window.api.removeScanProgress();
-
-  document.getElementById('scan-spinner').classList.add('hidden');
-  document.getElementById('scan-status').textContent = '';
-  document.getElementById('scan-result').querySelector('.scan-result-title').textContent += ' — duplicates checked';
-  await loadDashboard();
   document.getElementById('scan-done-btn').classList.remove('hidden');
 });
 
-document.getElementById('dup-skip-btn').addEventListener('click', () => {
-  document.getElementById('dup-prompt').classList.add('hidden');
-  document.getElementById('scan-done-btn').classList.remove('hidden');
-});
+
 
 document.getElementById('scan-done-btn').addEventListener('click', () => {
   document.getElementById('scan-overlay').classList.add('hidden');
