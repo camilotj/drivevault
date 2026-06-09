@@ -25,7 +25,7 @@
       "node_modules/**/*"
     ],
     "win": {
-      "icon": "assets/external-storage(1).ico",
+      "icon": "assets/favicon.ico",
       "target": [
         { "target": "nsis",     "arch": ["x64"] },
         { "target": "portable", "arch": ["x64"] }
@@ -34,8 +34,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "installerIcon": "assets/external-storage(1).ico",
-      "uninstallerIcon": "assets/external-storage(1).ico"
+      "installerIcon": "assets/favicon.ico",
+      "uninstallerIcon": "assets/favicon.ico"
     },
     "mac": {
       "category": "public.app-category.utilities",

@@ -659,7 +659,7 @@ app.whenReady().then(async () => {
     minHeight: 600,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     backgroundColor: '#0f0f13',
-    icon: path.join(__dirname, 'assets', 'external-storage(1).ico'),
+    icon: path.join(__dirname, 'assets', 'favicon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
