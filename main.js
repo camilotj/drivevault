@@ -2,7 +2,21 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { execSync } = require('child_process');
 const { scanDirectory } = require('./scanner');
+
+function getDriveSerial(folderPath) {
+  try {
+    const root = path.parse(folderPath).root;
+    if (!root) return null;
+    const letter = root.replace(/[\\/]/g, '');
+    const output = execSync(`vol ${letter}`, { encoding: 'utf8', timeout: 2000 });
+    const match = output.match(/Serial Number is ([A-F0-9-]+)/i);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
 
 let mainWindow;
 let db;
@@ -45,6 +59,7 @@ function runMigrations() {
     )
   `);
   try { db.run('ALTER TABLE drives ADD COLUMN description TEXT DEFAULT ""'); } catch {}
+  try { db.run('ALTER TABLE drives ADD COLUMN volume_serial TEXT DEFAULT NULL'); } catch {}
 
   db.run(`
     CREATE TABLE IF NOT EXISTS files (
@@ -240,8 +255,8 @@ ipcMain.handle('rescan-drive', async (event, driveId) => {
   folderInsert.free();
 
   db.run(
-    'UPDATE drives SET file_count = ?, folder_count = ?, used_size = ?, total_size = ?, scanned_at = ? WHERE id = ?',
-    [files.length, folderCount, usedSize, totalSize, new Date().toISOString(), driveId]
+    'UPDATE drives SET file_count = ?, folder_count = ?, used_size = ?, total_size = ?, scanned_at = ?, name = CASE WHEN (name IS NULL OR name = "") THEN ? ELSE name END, label = CASE WHEN (label IS NULL OR label = "") THEN ? ELSE label END WHERE id = ?',
+    [files.length, folderCount, usedSize, totalSize, new Date().toISOString(), driveName, driveName, driveId]
   );
 
   saveDB();
@@ -258,7 +273,8 @@ ipcMain.handle('scan-folder', async (event) => {
   if (result.canceled || !result.filePaths.length) return { canceled: true };
 
   const folderPath = result.filePaths[0];
-  const driveName = path.basename(folderPath);
+  const driveName = path.basename(folderPath) || path.parse(folderPath).root.replace(/[\\/]/g, '') || folderPath;
+  const volumeSerial = getDriveSerial(folderPath);
 
   const sendProgress = (msg) => {
     mainWindow.webContents.send('scan-progress', msg);
@@ -273,10 +289,15 @@ ipcMain.handle('scan-folder', async (event) => {
     usedSize = stat.bsize * (stat.blocks - stat.bfree);
   } catch {}
 
-  const existStmt = db.prepare('SELECT id FROM drives WHERE path = ?');
+  const existStmt = db.prepare('SELECT id, volume_serial FROM drives WHERE path = ?');
   existStmt.bind([folderPath]);
-  const existingDriveId = existStmt.step() ? existStmt.getAsObject().id : null;
+  const existingRow = existStmt.step() ? existStmt.getAsObject() : null;
   existStmt.free();
+
+  // Treat as new drive if the volume serial doesn't match — different physical drive at same letter
+  const existingDriveId = (existingRow && (!volumeSerial || !existingRow.volume_serial || volumeSerial === existingRow.volume_serial))
+    ? existingRow.id
+    : null;
 
   if (existingDriveId !== null) {
     sendProgress('Loading previous catalog…');
@@ -312,8 +333,8 @@ ipcMain.handle('scan-folder', async (event) => {
     folderInsert.free();
 
     db.run(
-      'UPDATE drives SET file_count = ?, folder_count = ?, used_size = ?, total_size = ?, scanned_at = ? WHERE id = ?',
-      [files.length, folderCount, usedSize, totalSize, new Date().toISOString(), existingDriveId]
+      'UPDATE drives SET file_count = ?, folder_count = ?, used_size = ?, total_size = ?, scanned_at = ?, volume_serial = COALESCE(volume_serial, ?), name = CASE WHEN (name IS NULL OR name = "") THEN ? ELSE name END, label = CASE WHEN (label IS NULL OR label = "") THEN ? ELSE label END WHERE id = ?',
+      [files.length, folderCount, usedSize, totalSize, new Date().toISOString(), volumeSerial, driveName, driveName, existingDriveId]
     );
 
     saveDB();
@@ -323,9 +344,9 @@ ipcMain.handle('scan-folder', async (event) => {
 
   // ── New drive ─────────────────────────────────────────────────────────────
   db.run(
-    `INSERT INTO drives (name, label, path, total_size, used_size, file_count, folder_count, scanned_at, color)
-     VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)`,
-    [driveName, driveName, folderPath, totalSize, usedSize, new Date().toISOString(), randomColor()]
+    `INSERT INTO drives (name, label, path, total_size, used_size, file_count, folder_count, scanned_at, color, volume_serial)
+     VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+    [driveName, driveName, folderPath, totalSize, usedSize, new Date().toISOString(), randomColor(), volumeSerial]
   );
 
   const driveId = db.exec('SELECT last_insert_rowid()')[0].values[0][0];
@@ -361,6 +382,12 @@ ipcMain.handle('clear-database', () => {
   db.run('DELETE FROM files');
   db.run('DELETE FROM folders');
   db.run('DELETE FROM drives');
+  saveDB();
+  return { ok: true };
+});
+
+ipcMain.handle('update-drive-name', (_, { driveId, name }) => {
+  db.run('UPDATE drives SET name = ?, label = ? WHERE id = ?', [name, name, driveId]);
   saveDB();
   return { ok: true };
 });

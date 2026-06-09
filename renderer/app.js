@@ -77,7 +77,7 @@ async function loadDashboard() {
 
   container.innerHTML = drives.map(d => {
     const usedPct = d.total_size > 0 ? Math.round((d.used_size / d.total_size) * 100) : 0;
-    const label = d.label || d.name;
+    const label = d.label || d.name || d.path.split(/[\\/]/).filter(Boolean).pop() || d.path;
     return `
       <div class="drive-card" data-drive-id="${d.id}" style="--card-color: ${d.color}" onclick="openDriveModal(${d.id})">
         <button class="drive-card-edit" onclick="event.stopPropagation(); openEditModal(${d.id})" title="Edit drive">
@@ -120,7 +120,7 @@ async function loadDrivesView() {
   }
 
   container.innerHTML = drives.map(d => {
-    const label = d.label || d.name;
+    const label = d.label || d.name || d.path.split(/[\\/]/).filter(Boolean).pop() || d.path;
     const scanned = new Date(d.scanned_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
     return `
       <div class="drive-row">
@@ -253,9 +253,9 @@ function renderFileTree(files, rootPath, connected) {
       html += `
         <div class="tree-folder">
           <div class="tree-folder-name" onclick="this.parentElement.querySelector('.tree-folder-children').classList.toggle('hidden')">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text3)"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text3)"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
             ${key}
-            <span style="color:var(--text3);font-size:11px;font-weight:400;margin-left:4px">${fileCount} files</span>
+            <span style="color:var(--text3);font-size:12px;font-weight:400;margin-left:4px">${fileCount} files</span>
           </div>
           <div class="tree-folder-children hidden">
             ${renderNode(child, depth + 1)}
@@ -270,12 +270,12 @@ function renderFileTree(files, rootPath, connected) {
       const { cls } = extIcon(f.ext);
       const revealBtn = connected && f.path
         ? `<button class="tree-file-reveal" title="Show in Explorer" data-path="${f.path.replace(/"/g, '&quot;')}" onclick="event.stopPropagation(); revealFile(this)">
-             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
            </button>`
         : '';
       html += `
         <div class="tree-file">
-          <span class="${cls}" style="font-size:11px;width:16px;text-align:center">${f.ext || '?'}</span>
+          <span class="${cls}" style="font-size:13px;width:20px;text-align:center">${f.ext || '?'}</span>
           <span>${f.name}</span>
           <span class="tree-file-size">${formatBytes(f.size)}</span>
           ${revealBtn}
@@ -541,11 +541,16 @@ function showToast(msg) {
 
 // ── Scan flow ─────────────────────────────────────────────────────────────────
 
+let _scanResultDriveId = null;
+
 function resetScanModal() {
   document.getElementById('scan-spinner').classList.remove('hidden');
   document.getElementById('scan-status').textContent = 'Scanning…';
   document.getElementById('scan-result').classList.add('hidden');
+  document.getElementById('drive-name-prompt').classList.add('hidden');
+  document.getElementById('drive-name-input').value = '';
   document.getElementById('scan-done-btn').classList.add('hidden');
+  _scanResultDriveId = null;
 }
 
 function showScanResultSummary(result) {
@@ -593,13 +598,27 @@ document.getElementById('scan-btn').addEventListener('click', async () => {
   loadDrivesView();
 
   showScanResultSummary(result);
+  _scanResultDriveId = result.driveId;
+
+  if (/^[A-Za-z]:$/.test(result.driveName)) {
+    document.getElementById('drive-name-prompt').classList.remove('hidden');
+    document.getElementById('drive-name-input').focus();
+  }
+
   document.getElementById('scan-done-btn').classList.remove('hidden');
 });
 
 
 
-document.getElementById('scan-done-btn').addEventListener('click', () => {
+document.getElementById('scan-done-btn').addEventListener('click', async () => {
+  const name = document.getElementById('drive-name-input').value.trim();
+  if (name && _scanResultDriveId) {
+    await window.api.updateDriveName(_scanResultDriveId, name);
+    await loadDashboard();
+    loadDrivesView();
+  }
   document.getElementById('scan-overlay').classList.add('hidden');
+  switchView('dashboard');
 });
 
 // ── Connection status polling ─────────────────────────────────────────────────

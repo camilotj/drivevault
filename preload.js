@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('api', {
   getDriveFiles: (driveId) => ipcRenderer.invoke('get-drive-files', driveId),
   deleteDrive: (driveId) => ipcRenderer.invoke('delete-drive', driveId),
   updateDriveLabel: (driveId, label, color, description) => ipcRenderer.invoke('update-drive-label', { driveId, label, color, description }),
+  updateDriveName: (driveId, name) => ipcRenderer.invoke('update-drive-name', { driveId, name }),
   searchFiles: (query) => ipcRenderer.invoke('search-files', query),
   getFolderFiles: (driveId, folderPath) => ipcRenderer.invoke('get-folder-files', { driveId, folderPath }),
   getStats: () => ipcRenderer.invoke('get-stats'),

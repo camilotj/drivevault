@@ -1,6 +1,6 @@
 {
   "name": "drivevault",
-  "version": "1.0.1",
+  "version": "1.0.9",
   "description": "External SSD catalog and duplicate finder",
   "main": "main.js",
   "scripts": {
