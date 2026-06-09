@@ -82,7 +82,7 @@ async function loadDashboard() {
     const usedPct = d.total_size > 0 ? Math.round((d.used_size / d.total_size) * 100) : 0;
     const label = d.label || d.name;
     return `
-      <div class="drive-card" style="--card-color: ${d.color}" onclick="openDriveModal(${d.id})">
+      <div class="drive-card" data-drive-id="${d.id}" style="--card-color: ${d.color}" onclick="openDriveModal(${d.id})">
         <button class="drive-card-edit" onclick="event.stopPropagation(); openEditModal(${d.id})" title="Edit drive">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         </button>
@@ -709,6 +709,23 @@ document.getElementById('dup-skip-btn').addEventListener('click', () => {
 document.getElementById('scan-done-btn').addEventListener('click', () => {
   document.getElementById('scan-overlay').classList.add('hidden');
 });
+
+// ── Connection status polling ─────────────────────────────────────────────────
+
+async function pollDriveStatus() {
+  const drives = await window.api.getDrives();
+  drives.forEach(d => {
+    const card = document.querySelector(`.drive-card[data-drive-id="${d.id}"]`);
+    if (!card) return;
+    const badge = card.querySelector('.drive-status-badge');
+    if (!badge) return;
+    const connected = !!d.connected;
+    badge.className = `drive-status-badge ${connected ? 'status-connected' : 'status-offline'}`;
+    badge.innerHTML = `<span class="status-dot"></span>${connected ? 'Connected' : 'Offline'}`;
+  });
+}
+
+setInterval(pollDriveStatus, 10000);
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
