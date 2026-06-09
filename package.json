@@ -1,6 +1,6 @@
 {
   "name": "drivevault",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "External SSD catalog and duplicate finder",
   "main": "main.js",
   "scripts": {
@@ -27,8 +27,18 @@
     "win": {
       "icon": "assets/favicon.ico",
       "target": [
-        { "target": "nsis",     "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
