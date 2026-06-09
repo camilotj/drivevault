@@ -3,7 +3,7 @@ const path = require('path');
 jest.mock('fs');
 const fs = require('fs');
 
-const { hashFile, scanDirectory } = require('../scanner');
+const { scanDirectory } = require('../scanner');
 
 function makeFile(name) {
   return { name, isDirectory: () => false, isFile: () => true };
@@ -19,21 +19,6 @@ const SUB  = path.join('/drive', 'sub');
 
 beforeEach(() => {
   jest.clearAllMocks();
-});
-
-// ── hashFile ────────────────────────────────────────────────────────────────
-
-describe('hashFile', () => {
-  it('returns an md5 hex string for a readable file', () => {
-    fs.readFileSync.mockReturnValue(Buffer.from('hello'));
-    const hash = hashFile(path.join('/drive', 'file.txt'));
-    expect(hash).toMatch(/^[a-f0-9]{32}$/);
-  });
-
-  it('returns null when the file cannot be read (e.g. drive disconnected)', () => {
-    fs.readFileSync.mockImplementation(() => { throw new Error('ENOENT'); });
-    expect(hashFile(path.join('/drive', 'file.txt'))).toBeNull();
-  });
 });
 
 // ── scanDirectory — normal operation ───────────────────────────────────────
@@ -171,21 +156,18 @@ describe('scanDirectory — drive disconnects mid-scan', () => {
   });
 });
 
-// ── scanDirectory — all files have hash: null ──────────────────────────────
+// ── scanDirectory — no hash field ─────────────────────────────────────────
 
-describe('scanDirectory — hash is always null', () => {
-  it('all returned files have hash: null regardless of size', () => {
-    fs.readdirSync.mockReturnValue([
-      makeFile('small.txt'),
-      makeFile('bigfile.iso')
-    ]);
+describe('scanDirectory — no hash field', () => {
+  it('returned files have no hash property', () => {
+    fs.readdirSync.mockReturnValue([makeFile('small.txt'), makeFile('bigfile.iso')]);
     fs.statSync
       .mockReturnValueOnce({ size: 100, mtime: new Date('2024-01-01') })
       .mockReturnValueOnce({ size: 600 * 1024 * 1024, mtime: new Date('2024-01-01') });
 
     const { files } = scanDirectory(ROOT, 1, noop);
     expect(files).toHaveLength(2);
-    expect(files.every(f => f.hash === null)).toBe(true);
+    expect(files.every(f => !('hash' in f))).toBe(true);
     expect(fs.readFileSync).not.toHaveBeenCalled();
   });
 });
