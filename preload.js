@@ -15,5 +15,9 @@ contextBridge.exposeInMainWorld('api', {
   exportJson: () => ipcRenderer.invoke('export-json'),
   exportHtml: () => ipcRenderer.invoke('export-html'),
   onScanProgress: (cb) => ipcRenderer.on('scan-progress', (_, msg) => cb(msg)),
-  removeScanProgress: () => ipcRenderer.removeAllListeners('scan-progress')
+  removeScanProgress: () => ipcRenderer.removeAllListeners('scan-progress'),
+  getDbPath: () => ipcRenderer.invoke('get-db-path'),
+  showItemInFolder: (p) => ipcRenderer.invoke('show-item-in-folder', p),
+  changeDbLocation: (copyExisting) => ipcRenderer.invoke('change-db-location', { copyExisting }),
+  importDb: () => ipcRenderer.invoke('import-db')
 });

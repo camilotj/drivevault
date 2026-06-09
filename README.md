@@ -7,10 +7,13 @@ An Electron desktop app for cataloguing external drives and SSDs. Scan a drive o
 ## What it does
 
 - **Offline catalog** — scans a drive and stores every file and folder into a local SQLite database. Once indexed, the catalog is fully browsable without the drive connected.
-- **Connection status** — the dashboard shows which drives are currently plugged in and which are offline.
-- **Search** — find files and folders by name across all indexed drives. Folder results are expandable to show their contents inline.
-- **Duplicate detection** — finds files with identical content (by MD5 hash) across all drives, grouped for review.
+- **Two-phase scanning** — a fast metadata scan runs first (names, sizes, dates). You are then asked whether to run a separate duplicate scan that reads file contents. Both phases show live progress.
+- **Connection status** — drive cards show Connected / Offline and refresh automatically every 10 seconds.
+- **Duplicate detection** — finds files with identical content (MD5 hash) across all drives. Fully-duplicated folders are shown as a single collapsed group rather than a long list of individual files.
+- **Search** — find files and folders by name across all indexed drives. Folder results expand inline to show their contents.
 - **Drive management** — rename drives, assign a colour, add a description, re-scan to refresh the catalog, or remove a drive from the index.
+- **Export** — export the full catalog as CSV (opens in Excel), JSON, or a self-contained HTML report.
+- **Database management** — choose where the database file is saved, move it to a new location, or import an existing `.db` file. All configurable from the Settings view.
 
 ---
 
@@ -18,15 +21,20 @@ An Electron desktop app for cataloguing external drives and SSDs. Scan a drive o
 
 ```
 drivevault/
-├── main.js           # Electron main process: DB setup, IPC handlers, scan orchestration
-├── scanner.js        # Pure Node.js: directory walk + file hashing (no Electron dependency)
-├── preload.js        # Context bridge: exposes safe IPC calls to the renderer
+├── main.js              # Electron main process: DB setup, IPC handlers, scan orchestration
+├── scanner.js           # Pure Node.js: directory walk, no Electron dependency
+├── preload.js           # Context bridge: exposes safe IPC calls to the renderer
 ├── renderer/
-│   ├── index.html    # App shell and modals
-│   ├── app.js        # All UI logic: dashboard, drives, search, duplicates, scan flow
-│   └── style.css     # Dark theme styles
+│   ├── index.html       # App shell and modals
+│   ├── app.js           # All UI logic: dashboard, drives, search, duplicates, settings, scan flow
+│   └── style.css        # Dark theme styles
 ├── tests/
 │   └── scanner.test.js  # Jest tests for scanner.js
+├── assets/
+│   └── favicon.ico      # App icon (256×256+)
+├── .github/
+│   └── workflows/
+│       └── build.yml    # GitHub Actions: build and publish Windows EXEs on tag push
 └── package.json
 ```
 
@@ -41,40 +49,54 @@ Renderer (index.html + app.js)
 Main process (main.js)
         │
         ├── scanner.js  ──▶  fs (Node.js)
-        └── sql.js      ──▶  drivevault.db  (userData directory)
+        └── sql.js      ──▶  drivevault.db  (configurable location)
 ```
 
 The renderer has no direct Node.js or filesystem access. Everything goes through the context bridge defined in `preload.js`, which maps friendly method names to `ipcRenderer.invoke` calls. The main process owns the database and filesystem.
 
 ### Database
 
-A single SQLite file (`drivevault.db`) stored in Electron's `userData` directory. Three tables:
+A single SQLite file (`drivevault.db`) managed by `sql.js`. Its location is configurable — the chosen path is stored in `drivevault-config.json` in Electron's `userData` folder. Defaults to `userData/drivevault.db` if no config exists.
+
+Three tables:
 
 | Table | Purpose |
 |---|---|
-| `drives` | One row per indexed drive. Stores name, label, path, colour, size stats, scan timestamp. |
-| `files` | One row per file found during a scan. Stores name, path, size, extension, modified date, MD5 hash. |
-| `folders` | One row per directory found during a scan. Stores name and path. Used by folder search. |
+| `drives` | One row per indexed drive. Stores name, label, path, colour, size stats, scan timestamp, and `dup_scanned_at` (null until duplicate scan is run). |
+| `files` | One row per file. Stores name, path, size, extension, modified date, and MD5 hash (null until duplicate scan runs for that drive). |
+| `folders` | One row per directory. Stores name and path. Used by folder search. |
 
 `files` and `folders` both have a `drive_id` foreign key with `ON DELETE CASCADE`, so removing a drive cleans up all its records.
 
-### Scanning
+### Scanning — two phases
+
+**Phase 1 — Metadata scan (always runs, fast)**
+
+`scanner.js` walks the directory tree using `fs.readdirSync` and `fs.statSync`. It collects file name, size, extension, and modified date — but never reads file contents. All files are saved to the DB with `hash: null`. This phase completes in seconds even on large drives.
 
 `scanner.js` exports two functions:
+- **`scanDirectory(dirPath, driveId, sendProgress)`** — recursive walk. Returns `{ files, folders, folderCount }`. Skips dot-prefixed entries. Caps recursion at depth 20. All filesystem errors are caught per-entry so a disconnected drive cannot abort the scan.
+- **`hashFile(filePath)`** — reads a file and returns its MD5 hex digest, or `null` on error. Called by the main process during Phase 2, not by the scanner itself.
 
-- **`hashFile(filePath)`** — reads a file and returns its MD5 hex digest, or `null` on any read error.
-- **`scanDirectory(dirPath, driveId, sendProgress)`** — recursive directory walk. Returns `{ files, folders, folderCount }`. Skips dot-prefixed entries. Skips hashing files ≥ 500 MB. Caps recursion at depth 20. All filesystem errors are caught per-entry so a single unreadable file or a mid-scan drive disconnect cannot abort the whole scan.
+**Phase 2 — Duplicate scan (optional, user-prompted)**
 
-The `scan-folder` IPC handler in `main.js` orchestrates the full flow:
-1. Opens a directory picker dialog.
-2. Reads disk usage via `fs.statfsSync`.
-3. Checks if the path was previously scanned (re-scan vs. new drive).
-4. Calls `scanDirectory` and writes results to the DB in a single transaction.
-5. Streams progress messages back to the renderer via `webContents.send`.
+After the metadata scan completes, the user is asked whether to run a duplicate scan. If they choose yes (or click the "No dup scan" badge on a drive card later):
+
+1. All file sizes for the target drive are loaded from the DB.
+2. A size-frequency map is built for the current drive's files, and a set of sizes already present on other drives is queried from the DB.
+3. Only files whose size appears more than once — either within this drive or on another drive — are candidates. Files with a globally unique size cannot be duplicates and are never read.
+4. Candidate files are read and MD5-hashed. The DB is updated with each hash. Progress is streamed to the UI.
+5. `dup_scanned_at` is set on the drive record.
+
+Drives that have not had a duplicate scan show an amber "No dup scan" badge on their dashboard card. Clicking the badge starts the duplicate scan immediately without needing a full re-scan.
 
 ### Connection status
 
-`get-drives` calls `fs.existsSync(drive.path)` for each drive before returning results. This is fast (single stat per drive) and gives an accurate connected/offline flag at load time.
+`get-drives` calls `fs.existsSync(drive.path)` for each drive before returning. The renderer polls this every 10 seconds and updates only the status badge on each card — no full re-render.
+
+### Duplicate detection
+
+`get-duplicates` queries for all files that share a hash with at least one other file. Before returning, it identifies fully-duplicated directories: a directory is fully duplicated if every one of its direct children appears in a duplicate group. Matching directories on different drives are surfaced as a single folder group. Files already covered by a folder group are excluded from the individual file groups, keeping the list concise.
 
 ---
 
@@ -96,18 +118,29 @@ npm test
 ### Building a distributable
 
 ```bash
-npm run build:win    # Windows NSIS installer
+npm run build:win    # Windows — NSIS installer + portable EXE
 npm run build:mac    # macOS DMG
 npm run build:linux  # Linux AppImage
 ```
 
 Output goes to `dist/`.
 
+### Automated releases (GitHub Actions)
+
+Pushing a version tag triggers the build workflow, which builds the Windows EXEs and attaches them to a GitHub Release automatically:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow file is at [.github/workflows/build.yml](.github/workflows/build.yml).
+
 ---
 
 ## Testing
 
-Tests live in `tests/scanner.test.js` and cover `scanner.js` in isolation using Jest's `fs` mock — no real filesystem access, no Electron.
+Tests live in `tests/scanner.test.js` and cover `scanner.js` in isolation using Jest's `fs` mock — no real filesystem, no Electron.
 
 ```
 Tests: 15 passing
@@ -128,15 +161,13 @@ scanDirectory — drive disconnects mid-scan
   ✓ returns empty result when root directory is gone before scan starts
   ✓ returns partial results when drive disconnects partway through
   ✓ skips a file whose stat throws (file disappears between readdir and stat)
-  ✓ still records a file when hashing fails
+  ✓ never calls readFileSync — hashing is deferred to the caller
   ✓ does not crash on deeply nested disconnects
   ✓ enforces the depth=20 safety cap and does not recurse forever
 
-scanDirectory — large file skips hash
-  ✓ does not hash files >= 500 MB
+scanDirectory — hash is always null
+  ✓ all returned files have hash: null regardless of size
 ```
-
-The IPC handlers in `main.js` are not unit-tested — they depend on `sql.js` and Electron and are best covered by manual smoke testing or an Electron integration test framework (e.g. Playwright with `electron` driver).
 
 ---
 
@@ -146,23 +177,31 @@ All calls go through `window.api` (exposed by `preload.js`).
 
 | Method | Arguments | Returns |
 |---|---|---|
-| `getDrives()` | — | Array of drive objects, each with a `connected` boolean |
+| `getDrives()` | — | Array of drive objects, each with a `connected` boolean and `dup_scanned_at` |
 | `getDriveFiles(driveId)` | `driveId: number` | Array of file objects for that drive |
 | `deleteDrive(driveId)` | `driveId: number` | `{ ok: true }` |
 | `updateDriveLabel(driveId, label, color, description)` | — | `{ ok: true }` |
-| `getDuplicates()` | — | Array of groups; each group is an array of files sharing an MD5 hash |
-| `searchFiles(query)` | `query: string` | `{ files: [...], folders: [...] }` — name-only match, no path matching |
-| `getFolderFiles(driveId, folderPath)` | — | Array of files whose path starts with `folderPath` |
+| `getDuplicates()` | — | `{ fileGroups, folderGroups }` |
+| `searchFiles(query)` | `query: string` | `{ files, folders }` — name-only match |
+| `getFolderFiles(driveId, folderPath)` | — | Array of files under `folderPath` |
 | `getStats()` | — | `{ driveCount, fileCount, totalSize, dupCount }` |
-| `scanFolder()` | — | `{ ok, isUpdate, driveName, fileCount, added?, removed? }` or `{ canceled: true }` |
-| `onScanProgress(cb)` | `cb: (msg: string) => void` | Registers a listener for scan progress messages |
+| `scanFolder()` | — | `{ ok, isUpdate, driveName, fileCount, driveId, added?, removed? }` |
+| `scanDuplicates(driveId)` | `driveId: number` | `{ ok, candidateCount }` |
+| `exportCsv()` | — | `{ ok, filePath }` or `{ canceled: true }` |
+| `exportJson()` | — | `{ ok, filePath }` or `{ canceled: true }` |
+| `exportHtml()` | — | `{ ok, filePath }` or `{ canceled: true }` |
+| `getDbPath()` | — | Absolute path string of the current database file |
+| `changeDbLocation(copyExisting)` | `copyExisting: boolean` | `{ ok, dbPath }` or `{ canceled: true }` |
+| `importDb()` | — | `{ ok }` or `{ canceled: true }` |
+| `showItemInFolder(path)` | `path: string` | Opens Explorer with the file highlighted |
+| `onScanProgress(cb)` | `cb: (msg: string) => void` | Registers a scan progress listener |
 | `removeScanProgress()` | — | Removes all scan progress listeners |
 
 ---
 
 ## Known limitations
 
-- **Folder search requires a re-scan.** Drives indexed before folder search was introduced do not have folder records. Re-scanning a drive populates them.
-- **Connection status is checked at load time only.** Plugging in a drive while the app is open will not update the status badge until the dashboard reloads.
-- **Hashing skips files ≥ 500 MB.** Large files (disk images, video exports) will not be included in duplicate detection.
+- **Folder search requires a re-scan** on drives indexed before folder records were introduced. Re-scanning populates them.
+- **Duplicate detection requires a dup scan on each drive.** Cross-drive duplicates only appear once both drives have had their duplicate scan run.
+- **Files ≥ 500 MB are not hashed.** Large files (disk images, raw video) are excluded from duplicate detection.
 - **No Windows UNC path support.** Paths like `\\server\share` are untested.

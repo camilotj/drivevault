@@ -35,7 +35,7 @@ function extIcon(ext) {
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 
-const views = ['dashboard', 'drives', 'duplicates', 'search'];
+const views = ['dashboard', 'drives', 'duplicates', 'search', 'settings'];
 
 document.querySelectorAll('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -50,6 +50,7 @@ function switchView(name) {
   if (name === 'duplicates') loadDuplicates();
   if (name === 'drives') loadDrivesView();
   if (name === 'search') document.getElementById('search-input').focus();
+  if (name === 'settings') loadSettings();
 }
 
 // ── Stats + Dashboard ─────────────────────────────────────────────────────────
@@ -586,6 +587,37 @@ async function toggleFolderContents(index, driveId, folderPath) {
       </div>
     `;
   }).join('');
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+async function loadSettings() {
+  const dbPath = await window.api.getDbPath();
+  document.getElementById('db-path-display').textContent = dbPath;
+}
+
+async function openDbFolder() {
+  const dbPath = await window.api.getDbPath();
+  window.api.showItemInFolder(dbPath);
+}
+
+async function changeDbLocation() {
+  const copy = confirm('Move your current database to the new location?\n\nOK = move existing data\nCancel = start with whatever is already at the new location');
+  const result = await window.api.changeDbLocation(copy);
+  if (result.canceled) return;
+  document.getElementById('db-path-display').textContent = result.dbPath;
+  showToast('Database location updated');
+  await loadDashboard();
+  loadDrivesView();
+}
+
+async function importDb() {
+  if (!confirm('This will replace your current catalog with the imported database. Continue?')) return;
+  const result = await window.api.importDb();
+  if (result.canceled) return;
+  showToast('Database imported successfully');
+  await loadDashboard();
+  loadDrivesView();
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────

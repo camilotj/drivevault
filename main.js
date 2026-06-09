@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -12,18 +12,23 @@ let SQL;
 
 let DB_PATH;
 
-async function initDB() {
-  DB_PATH = path.join(app.getPath('userData'), 'drivevault.db');
-  const initSqlJs = require('sql.js');
-  SQL = await initSqlJs();
+function getConfigPath() {
+  return path.join(app.getPath('userData'), 'drivevault-config.json');
+}
 
-  if (fs.existsSync(DB_PATH)) {
-    const filebuffer = fs.readFileSync(DB_PATH);
-    db = new SQL.Database(filebuffer);
-  } else {
-    db = new SQL.Database();
-  }
+function resolveDbPath() {
+  try {
+    const config = JSON.parse(fs.readFileSync(getConfigPath(), 'utf8'));
+    if (config.dbPath) return config.dbPath;
+  } catch {}
+  return path.join(app.getPath('userData'), 'drivevault.db');
+}
 
+function saveDbConfig(dbPath) {
+  fs.writeFileSync(getConfigPath(), JSON.stringify({ dbPath }, null, 2));
+}
+
+function runMigrations() {
   db.run(`
     CREATE TABLE IF NOT EXISTS drives (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +60,6 @@ async function initDB() {
       FOREIGN KEY (drive_id) REFERENCES drives(id) ON DELETE CASCADE
     )
   `);
-
   db.run(`CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_files_drive ON files(drive_id)`);
 
@@ -69,8 +73,23 @@ async function initDB() {
     )
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_folders_drive ON folders(drive_id)`);
+}
 
+function loadDatabase(dbPath) {
+  DB_PATH = dbPath;
+  if (fs.existsSync(dbPath)) {
+    db = new SQL.Database(fs.readFileSync(dbPath));
+  } else {
+    db = new SQL.Database();
+  }
+  runMigrations();
   saveDB();
+}
+
+async function initDB() {
+  const initSqlJs = require('sql.js');
+  SQL = await initSqlJs();
+  loadDatabase(resolveDbPath());
 }
 
 function saveDB() {
@@ -432,6 +451,41 @@ ipcMain.handle('scan-duplicates', async (event, driveId) => {
   db.run('UPDATE drives SET dup_scanned_at = ? WHERE id = ?', [new Date().toISOString(), driveId]);
   saveDB();
   return { ok: true, candidateCount: candidates.length };
+});
+
+ipcMain.handle('get-db-path', () => DB_PATH);
+
+ipcMain.handle('show-item-in-folder', (_, p) => shell.showItemInFolder(p));
+
+ipcMain.handle('change-db-location', async (_, { copyExisting }) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: 'Choose folder for DriveVault database'
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+
+  const newPath = path.join(result.filePaths[0], 'drivevault.db');
+
+  if (copyExisting && DB_PATH !== newPath && fs.existsSync(DB_PATH)) {
+    fs.copyFileSync(DB_PATH, newPath);
+  }
+
+  saveDbConfig(newPath);
+  loadDatabase(newPath);
+  return { ok: true, dbPath: newPath };
+});
+
+ipcMain.handle('import-db', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    title: 'Import DriveVault database',
+    filters: [{ name: 'SQLite Database', extensions: ['db'] }]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+
+  fs.copyFileSync(result.filePaths[0], DB_PATH);
+  loadDatabase(DB_PATH);
+  return { ok: true };
 });
 
 function randomColor() {
