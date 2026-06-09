@@ -16,22 +16,34 @@
     "directories": {
       "output": "dist"
     },
+    "files": [
+      "main.js",
+      "preload.js",
+      "scanner.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "icon": "assets/external-storage(1).ico",
+      "target": [
+        { "target": "nsis",     "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/external-storage(1).ico",
+      "uninstallerIcon": "assets/external-storage(1).ico"
+    },
     "mac": {
       "category": "public.app-category.utilities",
       "target": "dmg"
     },
-    "win": {
-      "target": "nsis"
-    },
     "linux": {
       "target": "AppImage"
-    },
-    "files": [
-      "main.js",
-      "preload.js",
-      "renderer/**/*",
-      "node_modules/**/*"
-    ]
+    }
   },
   "devDependencies": {
     "electron": "^35.2.0",
