@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DriveVault</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        <div id="logo">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="6" width="20" height="12" rx="2"/>
+            <path d="M6 12h.01M10 12h.01"/>
+            <circle cx="18" cy="12" r="1.5" fill="currentColor" stroke="none"/>
+          </svg>
+          DriveVault
+        </div>
+      </div>
+
+      <nav id="nav">
+        <button class="nav-item active" data-view="dashboard">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+          Dashboard
+        </button>
+        <button class="nav-item" data-view="drives">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12H2"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/></svg>
+          Drives
+          <span id="drives-badge" class="badge"></span>
+        </button>
+        <button class="nav-item" data-view="duplicates">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          Duplicates
+          <span id="dup-badge" class="badge badge-warn"></span>
+        </button>
+        <button class="nav-item" data-view="search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Search
+        </button>
+      </nav>
+
+      <div id="sidebar-footer">
+        <button id="scan-btn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Drive
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main id="content">
+      <!-- Dashboard view -->
+      <div id="view-dashboard" class="view active">
+        <div class="view-header">
+          <h1>Dashboard</h1>
+          <div class="export-menu-wrap">
+            <button class="btn-ghost export-trigger" onclick="toggleExportMenu()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export
+            </button>
+            <div class="export-menu hidden" id="export-menu">
+              <button class="export-option" onclick="runExport('csv')">
+                <span class="export-fmt">CSV</span>
+                <span class="export-desc">Flat file, opens in Excel</span>
+              </button>
+              <button class="export-option" onclick="runExport('json')">
+                <span class="export-fmt">JSON</span>
+                <span class="export-desc">Structured, full fidelity</span>
+              </button>
+              <button class="export-option" onclick="runExport('html')">
+                <span class="export-fmt">HTML</span>
+                <span class="export-desc">Shareable report</span>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon purple">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12H2"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>
+            </div>
+            <div class="stat-body">
+              <div class="stat-value" id="stat-drives">—</div>
+              <div class="stat-label">Drives indexed</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon green">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            </div>
+            <div class="stat-body">
+              <div class="stat-value" id="stat-size">—</div>
+              <div class="stat-label">Total indexed</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon orange">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+            </div>
+            <div class="stat-body">
+              <div class="stat-value" id="stat-dups">—</div>
+              <div class="stat-label">Duplicate files</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="drives-overview">
+          <h2 class="section-title">Your Drives</h2>
+          <div id="drive-cards"></div>
+          <div id="empty-state" class="hidden">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3"><path d="M22 12H2"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>
+            <p>No drives indexed yet</p>
+            <button class="btn-primary" onclick="document.getElementById('scan-btn').click()">Add your first drive</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Drives view -->
+      <div id="view-drives" class="view">
+        <div class="view-header">
+          <h1>Drives</h1>
+        </div>
+        <div id="drives-list"></div>
+      </div>
+
+      <!-- Duplicates view -->
+      <div id="view-duplicates" class="view">
+        <div class="view-header">
+          <h1>Duplicates</h1>
+          <span id="dup-count-label" class="view-subtitle"></span>
+        </div>
+        <div id="duplicates-list"></div>
+        <div id="dup-empty" class="empty-inline hidden">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+          <p>No duplicate files found across your drives.</p>
+        </div>
+      </div>
+
+      <!-- Search view -->
+      <div id="view-search" class="view">
+        <div class="view-header">
+          <h1>Search</h1>
+        </div>
+        <div id="search-bar-wrap">
+          <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input id="search-input" type="text" placeholder="Search files and folders across all drives…" />
+        </div>
+        <div id="search-results"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Scan progress overlay -->
+  <div id="scan-overlay" class="hidden">
+    <div id="scan-modal">
+      <div class="scan-spinner" id="scan-spinner"></div>
+      <div id="scan-status">Scanning…</div>
+      <div id="scan-result" class="hidden"></div>
+      <div id="dup-prompt" class="hidden">
+        <p class="dup-prompt-text">Run a duplicate scan now? This reads file contents to detect identical files and may take a few minutes on large drives.</p>
+        <div class="dup-prompt-actions">
+          <button id="dup-skip-btn" class="btn-ghost">Skip for now</button>
+          <button id="dup-scan-btn" class="btn-primary">Check for duplicates</button>
+        </div>
+      </div>
+      <button id="scan-done-btn" class="btn-primary hidden">Done</button>
+    </div>
+  </div>
+
+  <!-- Drive detail modal -->
+  <div id="drive-modal" class="hidden">
+    <div id="drive-modal-inner">
+      <div id="drive-modal-header">
+        <h2 id="drive-modal-title"></h2>
+        <button id="drive-modal-close">✕</button>
+      </div>
+      <div id="drive-modal-meta"></div>
+      <div id="drive-modal-desc"></div>
+      <div id="file-tree"></div>
+    </div>
+  </div>
+
+  <!-- Edit Drive modal -->
+  <div id="edit-modal" class="hidden">
+    <div id="edit-modal-inner">
+      <div class="edit-modal-header">
+        <h2>Edit Drive</h2>
+        <button id="edit-modal-close">✕</button>
+      </div>
+      <div class="edit-form">
+        <div class="form-group">
+          <label class="form-label">Name</label>
+          <input id="edit-name" type="text" class="form-input" placeholder="Drive name" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Description</label>
+          <textarea id="edit-description" class="form-textarea" placeholder="Describe this drive…"></textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Color</label>
+          <div class="color-swatches" id="edit-colors"></div>
+        </div>
+      </div>
+      <div class="edit-modal-footer">
+        <button id="edit-cancel" class="btn-ghost">Cancel</button>
+        <button id="edit-save" class="btn-primary">Save Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

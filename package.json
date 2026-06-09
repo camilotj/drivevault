@@ -1,0 +1,44 @@
+{
+  "name": "drivevault",
+  "version": "1.0.0",
+  "description": "External SSD catalog and duplicate finder",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "jest",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.drivevault.app",
+    "productName": "DriveVault",
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "node_modules/**/*"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^35.2.0",
+    "electron-builder": "^26.0.12",
+    "jest": "^30.4.2"
+  },
+  "dependencies": {
+    "sql.js": "^1.13.0"
+  }
+}

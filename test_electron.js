@@ -1,0 +1,1 @@
+const e = require("electron"); console.log("TYPE:", typeof e); console.log("KEYS:", Object.keys(e || {}).join(",")); console.log("app:", typeof e.app); console.log("ipcMain:", typeof e.ipcMain); process.exit(0);
