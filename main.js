@@ -118,7 +118,13 @@ ipcMain.handle('get-drives', () => {
   const drives = [];
   while (stmt.step()) {
     const drive = stmt.getAsObject();
-    drive.connected = fs.existsSync(drive.path) ? 1 : 0;
+    const pathExists = fs.existsSync(drive.path);
+    if (pathExists && drive.volume_serial) {
+      const currentSerial = getDriveSerial(drive.path);
+      drive.connected = (currentSerial === drive.volume_serial) ? 1 : 0;
+    } else {
+      drive.connected = pathExists ? 1 : 0;
+    }
     drives.push(drive);
   }
   stmt.free();

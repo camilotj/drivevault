@@ -1,5 +1,7 @@
 # DriveVault
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/camilotj)
+
 An Electron desktop app for cataloguing external drives and SSDs. Scan a drive once, then browse its files, search across all indexed drives, and export the catalog — even when the drive is unplugged.
 
 ---
