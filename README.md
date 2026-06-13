@@ -1,6 +1,6 @@
 # DriveVault
 
-If you have a bunch of drives(internal or external SSDs or HDDs, usb, SDcards ...) laying around and you want to have an overview over them this app can help you.
+If you have a bunch of drives(internal or external SSDs or HDDs, usb, SDcards ...) laying around and you want to have an overview this app can help you.
 DriveVault scans a drive once, then you can browse its files, search across all indexed drives, and export the catalog — even when the drive is unplugged.
 
 Of course the application does not edit your drives or data in any way.
