@@ -1,8 +1,20 @@
 # DriveVault
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/camilotj)
+If you have a bunch of drives(internal or external SSDs or HDDs, usb, SDcards ...) laying around and you want to have an overview over them this app can help you.
+DriveVault scans a drive once, then you can browse its files, search across all indexed drives, and export the catalog — even when the drive is unplugged.
 
-An Electron desktop app for cataloguing external drives and SSDs. Scan a drive once, then browse its files, search across all indexed drives, and export the catalog — even when the drive is unplugged.
+Of course the application does not edit your drives or data in any way.
+
+If you want to download it just go to the releases section and download the setup.exe file.
+
+![DriveVault dashboard](assets/Screenshot%202026-06-13%20085906.png)
+
+![DriveVault drive detail](assets/Screenshot%202026-06-13%20085924.png)
+
+The application is free to use and the data about your drives is saved in your computer.
+If you got some value from it please consider donating.
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/camilotj)
 
 ---
 

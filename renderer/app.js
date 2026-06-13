@@ -123,7 +123,7 @@ async function loadDrivesView() {
     const label = d.label || d.name || d.path.split(/[\\/]/).filter(Boolean).pop() || d.path;
     const scanned = new Date(d.scanned_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
     return `
-      <div class="drive-row">
+      <div class="drive-row" data-drive-id="${d.id}">
         <div class="drive-row-dot" style="background: ${d.color}"></div>
         <div class="drive-row-info">
           <div class="drive-row-name">
@@ -173,7 +173,12 @@ async function rescanDrive(driveId) {
   const result = await window.api.rescanDrive(driveId);
   window.api.removeScanProgress();
 
-  if (!result || !result.ok) {
+  if (!result || result.busy) {
+    document.getElementById('scan-overlay').classList.add('hidden');
+    if (result?.busy) showToast('A scan is already in progress.');
+    return;
+  }
+  if (!result.ok) {
     document.getElementById('scan-overlay').classList.add('hidden');
     return;
   }
@@ -187,8 +192,7 @@ async function rescanDrive(driveId) {
 // ── Drive detail modal ────────────────────────────────────────────────────────
 
 async function openDriveModal(driveId) {
-  const drives = await window.api.getDrives();
-  const drive = drives.find(d => d.id === driveId);
+  const drive = await window.api.getDrive(driveId);
   if (!drive) return;
 
   document.getElementById('drive-modal-title').textContent = drive.label || drive.name;
@@ -209,8 +213,8 @@ async function openDriveModal(driveId) {
   document.getElementById('file-tree').innerHTML = '<div style="color:var(--text3);padding:20px 0">Loading…</div>';
   document.getElementById('drive-modal').classList.remove('hidden');
 
-  const files = await window.api.getDriveFiles(driveId);
-  renderFileTree(files, drive.path, drive.connected);
+  const { files, truncated } = await window.api.getDriveFiles(driveId);
+  renderFileTree(files, drive.path, drive.connected, truncated);
 }
 
 document.getElementById('drive-modal-close').addEventListener('click', () => {
@@ -223,7 +227,7 @@ document.getElementById('drive-modal').addEventListener('click', (e) => {
   }
 });
 
-function renderFileTree(files, rootPath, connected) {
+function renderFileTree(files, rootPath, connected, truncated = false) {
   // Build tree structure
   const tree = {};
 
@@ -242,7 +246,7 @@ function renderFileTree(files, rootPath, connected) {
   }
 
   function renderNode(node, depth = 0) {
-    if (depth > 8) return '';
+    if (depth > 20) return '';
     let html = '';
 
     // Folders first
@@ -294,7 +298,11 @@ function renderFileTree(files, rootPath, connected) {
     return n;
   }
 
-  document.getElementById('file-tree').innerHTML = renderNode(tree);
+  let html = renderNode(tree);
+  if (truncated) {
+    html += `<div style="color:var(--text3);font-size:12px;padding:14px 0 4px">Showing first 10,000 files — use Search to find files beyond this limit.</div>`;
+  }
+  document.getElementById('file-tree').innerHTML = html;
 }
 
 function revealFile(btn) {
@@ -589,7 +597,12 @@ document.getElementById('scan-btn').addEventListener('click', async () => {
   const result = await window.api.scanFolder();
   window.api.removeScanProgress();
 
-  if (!result || !result.ok) {
+  if (!result || result.busy) {
+    document.getElementById('scan-overlay').classList.add('hidden');
+    if (result?.busy) showToast('A scan is already in progress.');
+    return;
+  }
+  if (!result.ok) {
     document.getElementById('scan-overlay').classList.add('hidden');
     return;
   }
@@ -626,13 +639,21 @@ document.getElementById('scan-done-btn').addEventListener('click', async () => {
 async function pollDriveStatus() {
   const drives = await window.api.getDrives();
   drives.forEach(d => {
-    const card = document.querySelector(`.drive-card[data-drive-id="${d.id}"]`);
-    if (!card) return;
-    const badge = card.querySelector('.drive-status-badge');
-    if (!badge) return;
     const connected = !!d.connected;
-    badge.className = `drive-status-badge ${connected ? 'status-connected' : 'status-offline'}`;
-    badge.innerHTML = `<span class="status-dot"></span>${connected ? 'Connected' : 'Offline'}`;
+    const cls = `drive-status-badge ${connected ? 'status-connected' : 'status-offline'}`;
+    const inner = `<span class="status-dot"></span>${connected ? 'Connected' : 'Offline'}`;
+
+    const card = document.querySelector(`.drive-card[data-drive-id="${d.id}"]`);
+    if (card) {
+      const badge = card.querySelector('.drive-status-badge');
+      if (badge) { badge.className = cls; badge.innerHTML = inner; }
+    }
+
+    const row = document.querySelector(`.drive-row[data-drive-id="${d.id}"]`);
+    if (row) {
+      const badge = row.querySelector('.drive-status-badge');
+      if (badge) { badge.className = cls; badge.innerHTML = inner; }
+    }
   });
 }
 

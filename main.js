@@ -2,25 +2,13 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execSync } = require('child_process');
 const { scanDirectory } = require('./scanner');
-
-function getDriveSerial(folderPath) {
-  try {
-    const root = path.parse(folderPath).root;
-    if (!root) return null;
-    const letter = root.replace(/[\\/]/g, '');
-    const output = execSync(`vol ${letter}`, { encoding: 'utf8', timeout: 2000 });
-    const match = output.match(/Serial Number is ([A-F0-9-]+)/i);
-    return match ? match[1] : null;
-  } catch {
-    return null;
-  }
-}
+const { getDriveSerial, getDriveName } = require('./utils');
 
 let mainWindow;
 let db;
 let SQL;
+let isScanning = false;
 
 // ── Database setup ──────────────────────────────────────────────────────────
 
@@ -111,209 +99,176 @@ function saveDB() {
   fs.writeFileSync(DB_PATH, Buffer.from(data));
 }
 
+// ── Shared helper ─────────────────────────────────────────────────────────────
+
+function driveWithConnected(drive) {
+  const pathExists = fs.existsSync(drive.path);
+  if (pathExists && drive.volume_serial) {
+    const currentSerial = getDriveSerial(drive.path);
+    drive.connected = (currentSerial === drive.volume_serial) ? 1 : 0;
+  } else {
+    drive.connected = pathExists ? 1 : 0;
+  }
+  return drive;
+}
+
 // ── IPC Handlers ─────────────────────────────────────────────────────────────
 
 ipcMain.handle('get-drives', () => {
-  const stmt = db.prepare('SELECT * FROM drives ORDER BY scanned_at DESC');
-  const drives = [];
-  while (stmt.step()) {
-    const drive = stmt.getAsObject();
-    const pathExists = fs.existsSync(drive.path);
-    if (pathExists && drive.volume_serial) {
-      const currentSerial = getDriveSerial(drive.path);
-      drive.connected = (currentSerial === drive.volume_serial) ? 1 : 0;
-    } else {
-      drive.connected = pathExists ? 1 : 0;
-    }
-    drives.push(drive);
-  }
-  stmt.free();
-  return drives;
+  try {
+    const stmt = db.prepare('SELECT * FROM drives ORDER BY scanned_at DESC');
+    const drives = [];
+    while (stmt.step()) drives.push(driveWithConnected(stmt.getAsObject()));
+    stmt.free();
+    return drives;
+  } catch (e) { return []; }
 });
 
+// Fix 8: single-drive lookup so openDriveModal doesn't fetch all drives
+ipcMain.handle('get-drive', (_, driveId) => {
+  try {
+    const stmt = db.prepare('SELECT * FROM drives WHERE id = ?');
+    stmt.bind([driveId]);
+    if (!stmt.step()) { stmt.free(); return null; }
+    const drive = driveWithConnected(stmt.getAsObject());
+    stmt.free();
+    return drive;
+  } catch (e) { return null; }
+});
+
+// Fix 3: cap result at 10 000 files, return truncated flag
 ipcMain.handle('get-drive-files', (_, driveId) => {
-  const stmt = db.prepare('SELECT * FROM files WHERE drive_id = ? ORDER BY path ASC');
-  stmt.bind([driveId]);
-  const files = [];
-  while (stmt.step()) files.push(stmt.getAsObject());
-  stmt.free();
-  return files;
+  try {
+    const LIMIT = 10000;
+    const stmt = db.prepare('SELECT * FROM files WHERE drive_id = ? ORDER BY path ASC LIMIT ?');
+    stmt.bind([driveId, LIMIT + 1]);
+    const files = [];
+    while (stmt.step()) files.push(stmt.getAsObject());
+    stmt.free();
+    const truncated = files.length > LIMIT;
+    if (truncated) files.pop();
+    return { files, truncated };
+  } catch (e) { return { files: [], truncated: false }; }
 });
 
 ipcMain.handle('delete-drive', (_, driveId) => {
-  db.run('DELETE FROM files WHERE drive_id = ?', [driveId]);
-  db.run('DELETE FROM folders WHERE drive_id = ?', [driveId]);
-  db.run('DELETE FROM drives WHERE id = ?', [driveId]);
-  saveDB();
-  return { ok: true };
+  try {
+    db.run('DELETE FROM files WHERE drive_id = ?', [driveId]);
+    db.run('DELETE FROM folders WHERE drive_id = ?', [driveId]);
+    db.run('DELETE FROM drives WHERE id = ?', [driveId]);
+    saveDB();
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('update-drive-label', (_, { driveId, label, color, description }) => {
-  db.run('UPDATE drives SET label = ?, color = ?, description = ? WHERE id = ?', [label, color, description ?? '', driveId]);
-  saveDB();
-  return { ok: true };
+  try {
+    db.run('UPDATE drives SET label = ?, color = ?, description = ? WHERE id = ?', [label, color, description ?? '', driveId]);
+    saveDB();
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
-
+// Fix 9: escape LIKE special chars so % and _ are treated as literals
 ipcMain.handle('search-files', (_, query) => {
-  const like = `%${query}%`;
+  try {
+    const escaped = query.replace(/[%_|]/g, '|$&');
+    const like = `%${escaped}%`;
 
-  const fileStmt = db.prepare(`
-    SELECT f.*, d.name as drive_name, d.label as drive_label, d.color as drive_color
-    FROM files f
-    JOIN drives d ON f.drive_id = d.id
-    WHERE f.name LIKE ?
-    ORDER BY f.name ASC
-    LIMIT 200
-  `);
-  fileStmt.bind([like]);
-  const files = [];
-  while (fileStmt.step()) files.push(fileStmt.getAsObject());
-  fileStmt.free();
+    const fileStmt = db.prepare(`
+      SELECT f.*, d.name as drive_name, d.label as drive_label, d.color as drive_color
+      FROM files f
+      JOIN drives d ON f.drive_id = d.id
+      WHERE f.name LIKE ? ESCAPE '|'
+      ORDER BY f.name ASC
+      LIMIT 200
+    `);
+    fileStmt.bind([like]);
+    const files = [];
+    while (fileStmt.step()) files.push(fileStmt.getAsObject());
+    fileStmt.free();
 
-  const folderStmt = db.prepare(`
-    SELECT fo.id, fo.drive_id, fo.name, fo.path,
-           d.name as drive_name, d.label as drive_label, d.color as drive_color
-    FROM folders fo
-    JOIN drives d ON fo.drive_id = d.id
-    WHERE fo.name LIKE ?
-    ORDER BY fo.name ASC
-    LIMIT 100
-  `);
-  folderStmt.bind([like]);
-  const folders = [];
-  while (folderStmt.step()) folders.push(folderStmt.getAsObject());
-  folderStmt.free();
+    const folderStmt = db.prepare(`
+      SELECT fo.id, fo.drive_id, fo.name, fo.path,
+             d.name as drive_name, d.label as drive_label, d.color as drive_color
+      FROM folders fo
+      JOIN drives d ON fo.drive_id = d.id
+      WHERE fo.name LIKE ? ESCAPE '|'
+      ORDER BY fo.name ASC
+      LIMIT 100
+    `);
+    folderStmt.bind([like]);
+    const folders = [];
+    while (folderStmt.step()) folders.push(folderStmt.getAsObject());
+    folderStmt.free();
 
-  return { files, folders };
+    return { files, folders };
+  } catch (e) { return { files: [], folders: [] }; }
 });
 
+// Fix 4: escape LIKE special chars in folder path
 ipcMain.handle('get-folder-files', (_, { driveId, folderPath }) => {
-  const pattern = path.join(folderPath, '%');
-  const stmt = db.prepare(`
-    SELECT name, path, size, ext
-    FROM files
-    WHERE drive_id = ? AND path LIKE ?
-    ORDER BY path ASC
-    LIMIT 500
-  `);
-  stmt.bind([driveId, pattern]);
-  const files = [];
-  while (stmt.step()) files.push(stmt.getAsObject());
-  stmt.free();
-  return files;
+  try {
+    const escapedFolder = folderPath.replace(/[%_|]/g, '|$&');
+    const pattern = escapedFolder + path.sep + '%';
+    const stmt = db.prepare(`
+      SELECT name, path, size, ext
+      FROM files
+      WHERE drive_id = ? AND path LIKE ? ESCAPE '|'
+      ORDER BY path ASC
+      LIMIT 500
+    `);
+    stmt.bind([driveId, pattern]);
+    const files = [];
+    while (stmt.step()) files.push(stmt.getAsObject());
+    stmt.free();
+    return files;
+  } catch (e) { return []; }
 });
 
 ipcMain.handle('get-stats', () => {
-  const driveCount = db.exec('SELECT COUNT(*) as c FROM drives')[0]?.values[0][0] || 0;
-  const fileCount = db.exec('SELECT COUNT(*) as c FROM files')[0]?.values[0][0] || 0;
-  const totalSize = db.exec('SELECT SUM(size) as s FROM files')[0]?.values[0][0] || 0;
-  return { driveCount, fileCount, totalSize };
+  try {
+    const driveCount = db.exec('SELECT COUNT(*) as c FROM drives')[0]?.values[0][0] || 0;
+    const fileCount = db.exec('SELECT COUNT(*) as c FROM files')[0]?.values[0][0] || 0;
+    const totalSize = db.exec('SELECT SUM(size) as s FROM files')[0]?.values[0][0] || 0;
+    return { driveCount, fileCount, totalSize };
+  } catch (e) { return { driveCount: 0, fileCount: 0, totalSize: 0 }; }
 });
 
+// Fixes 1, 2, 7, 10: transaction, concurrency guard, serial backfill, error handling
 ipcMain.handle('rescan-drive', async (event, driveId) => {
+  if (isScanning) return { busy: true };
+  isScanning = true;
+
   const sendProgress = (msg) => mainWindow.webContents.send('scan-progress', msg);
 
-  const driveStmt = db.prepare('SELECT * FROM drives WHERE id = ?');
-  driveStmt.bind([driveId]);
-  if (!driveStmt.step()) { driveStmt.free(); return { ok: false }; }
-  const drive = driveStmt.getAsObject();
-  driveStmt.free();
-
-  const folderPath = drive.path;
-  const driveName = drive.label || drive.name;
-
-  let totalSize = 0, usedSize = 0;
   try {
-    const stat = fs.statfsSync(folderPath);
-    totalSize = stat.bsize * stat.blocks;
-    usedSize = stat.bsize * (stat.blocks - stat.bfree);
-  } catch {}
+    const driveStmt = db.prepare('SELECT * FROM drives WHERE id = ?');
+    driveStmt.bind([driveId]);
+    if (!driveStmt.step()) { driveStmt.free(); return { ok: false }; }
+    const drive = driveStmt.getAsObject();
+    driveStmt.free();
 
-  sendProgress('Loading previous catalog…');
-  const oldStmt = db.prepare('SELECT path FROM files WHERE drive_id = ?');
-  oldStmt.bind([driveId]);
-  const oldPaths = new Set();
-  while (oldStmt.step()) oldPaths.add(oldStmt.getAsObject().path);
-  oldStmt.free();
+    const folderPath = drive.path;
+    const driveName = drive.label || drive.name;
+    const volumeSerial = getDriveSerial(folderPath); // Fix 7: backfill serial on rescan
 
-  const { files, folders, folderCount } = scanDirectory(folderPath, driveId, sendProgress);
+    let totalSize = 0, usedSize = 0;
+    try {
+      const stat = fs.statfsSync(folderPath);
+      totalSize = stat.bsize * stat.blocks;
+      usedSize = stat.bsize * (stat.blocks - stat.bfree);
+    } catch {}
 
-  sendProgress('Comparing with previous catalog…');
-  const newPaths = new Set(files.map(f => f.path));
-  const added = [...newPaths].filter(p => !oldPaths.has(p)).length;
-  const removed = [...oldPaths].filter(p => !newPaths.has(p)).length;
-
-  sendProgress(`Saving ${files.length} files to database…`);
-  db.run('DELETE FROM files WHERE drive_id = ?', [driveId]);
-  db.run('DELETE FROM folders WHERE drive_id = ?', [driveId]);
-
-  const insert = db.prepare('INSERT INTO files (drive_id, name, path, size, ext, modified_at) VALUES (?, ?, ?, ?, ?, ?)');
-  for (const f of files) {
-    insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at]);
-  }
-  insert.free();
-
-  const folderInsert = db.prepare('INSERT INTO folders (drive_id, name, path) VALUES (?, ?, ?)');
-  for (const fo of folders) {
-    folderInsert.run([fo.drive_id, fo.name, fo.path]);
-  }
-  folderInsert.free();
-
-  db.run(
-    'UPDATE drives SET file_count = ?, folder_count = ?, used_size = ?, total_size = ?, scanned_at = ?, name = CASE WHEN (name IS NULL OR name = "") THEN ? ELSE name END, label = CASE WHEN (label IS NULL OR label = "") THEN ? ELSE label END WHERE id = ?',
-    [files.length, folderCount, usedSize, totalSize, new Date().toISOString(), driveName, driveName, driveId]
-  );
-
-  saveDB();
-  sendProgress('Done!');
-  return { ok: true, isUpdate: true, driveName, fileCount: files.length, added, removed, driveId };
-});
-
-ipcMain.handle('scan-folder', async (event) => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openDirectory'],
-    message: 'Select the root folder of your external SSD'
-  });
-
-  if (result.canceled || !result.filePaths.length) return { canceled: true };
-
-  const folderPath = result.filePaths[0];
-  const driveName = path.basename(folderPath) || path.parse(folderPath).root.replace(/[\\/]/g, '') || folderPath;
-  const volumeSerial = getDriveSerial(folderPath);
-
-  const sendProgress = (msg) => {
-    mainWindow.webContents.send('scan-progress', msg);
-  };
-
-  sendProgress(`Starting scan of "${driveName}"...`);
-
-  let totalSize = 0, usedSize = 0;
-  try {
-    const stat = fs.statfsSync(folderPath);
-    totalSize = stat.bsize * stat.blocks;
-    usedSize = stat.bsize * (stat.blocks - stat.bfree);
-  } catch {}
-
-  const existStmt = db.prepare('SELECT id, volume_serial FROM drives WHERE path = ?');
-  existStmt.bind([folderPath]);
-  const existingRow = existStmt.step() ? existStmt.getAsObject() : null;
-  existStmt.free();
-
-  // Treat as new drive if the volume serial doesn't match — different physical drive at same letter
-  const existingDriveId = (existingRow && (!volumeSerial || !existingRow.volume_serial || volumeSerial === existingRow.volume_serial))
-    ? existingRow.id
-    : null;
-
-  if (existingDriveId !== null) {
     sendProgress('Loading previous catalog…');
     const oldStmt = db.prepare('SELECT path FROM files WHERE drive_id = ?');
-    oldStmt.bind([existingDriveId]);
+    oldStmt.bind([driveId]);
     const oldPaths = new Set();
     while (oldStmt.step()) oldPaths.add(oldStmt.getAsObject().path);
     oldStmt.free();
 
-    const { files, folders, folderCount } = scanDirectory(folderPath, existingDriveId, sendProgress);
+    // Scan happens outside the transaction — filesystem read only
+    const { files, folders, folderCount } = scanDirectory(folderPath, driveId, sendProgress);
 
     sendProgress('Comparing with previous catalog…');
     const newPaths = new Set(files.map(f => f.path));
@@ -321,116 +276,229 @@ ipcMain.handle('scan-folder', async (event) => {
     const removed = [...oldPaths].filter(p => !newPaths.has(p)).length;
 
     sendProgress(`Saving ${files.length} files to database…`);
-    db.run('DELETE FROM files WHERE drive_id = ?', [existingDriveId]);
-    db.run('DELETE FROM folders WHERE drive_id = ?', [existingDriveId]);
 
-    const insert = db.prepare(
-      'INSERT INTO files (drive_id, name, path, size, ext, modified_at) VALUES (?, ?, ?, ?, ?, ?)'
-    );
-    for (const f of files) {
-      insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at]);
+    // Fix 1: atomic replace — if anything throws, ROLLBACK restores the old catalog
+    db.run('BEGIN');
+    try {
+      db.run('DELETE FROM files WHERE drive_id = ?', [driveId]);
+      db.run('DELETE FROM folders WHERE drive_id = ?', [driveId]);
+
+      const insert = db.prepare('INSERT INTO files (drive_id, name, path, size, ext, modified_at) VALUES (?, ?, ?, ?, ?, ?)');
+      for (const f of files) insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at]);
+      insert.free();
+
+      const folderInsert = db.prepare('INSERT INTO folders (drive_id, name, path) VALUES (?, ?, ?)');
+      for (const fo of folders) folderInsert.run([fo.drive_id, fo.name, fo.path]);
+      folderInsert.free();
+
+      db.run(
+        'UPDATE drives SET file_count = ?, folder_count = ?, used_size = ?, total_size = ?, scanned_at = ?, volume_serial = COALESCE(volume_serial, ?), name = CASE WHEN (name IS NULL OR name = "") THEN ? ELSE name END, label = CASE WHEN (label IS NULL OR label = "") THEN ? ELSE label END WHERE id = ?',
+        [files.length, folderCount, usedSize, totalSize, new Date().toISOString(), volumeSerial, driveName, driveName, driveId]
+      );
+
+      db.run('COMMIT');
+    } catch (e) {
+      db.run('ROLLBACK');
+      throw e;
     }
-    insert.free();
-
-    const folderInsert = db.prepare('INSERT INTO folders (drive_id, name, path) VALUES (?, ?, ?)');
-    for (const fo of folders) {
-      folderInsert.run([fo.drive_id, fo.name, fo.path]);
-    }
-    folderInsert.free();
-
-    db.run(
-      'UPDATE drives SET file_count = ?, folder_count = ?, used_size = ?, total_size = ?, scanned_at = ?, volume_serial = COALESCE(volume_serial, ?), name = CASE WHEN (name IS NULL OR name = "") THEN ? ELSE name END, label = CASE WHEN (label IS NULL OR label = "") THEN ? ELSE label END WHERE id = ?',
-      [files.length, folderCount, usedSize, totalSize, new Date().toISOString(), volumeSerial, driveName, driveName, existingDriveId]
-    );
 
     saveDB();
     sendProgress('Done!');
-    return { ok: true, isUpdate: true, driveName, fileCount: files.length, added, removed, driveId: existingDriveId };
+    return { ok: true, isUpdate: true, driveName, fileCount: files.length, added, removed, driveId };
+  } catch (e) {
+    sendProgress('Scan failed.');
+    return { ok: false, error: e.message };
+  } finally {
+    isScanning = false;
   }
-
-  // ── New drive ─────────────────────────────────────────────────────────────
-  db.run(
-    `INSERT INTO drives (name, label, path, total_size, used_size, file_count, folder_count, scanned_at, color, volume_serial)
-     VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
-    [driveName, driveName, folderPath, totalSize, usedSize, new Date().toISOString(), randomColor(), volumeSerial]
-  );
-
-  const driveId = db.exec('SELECT last_insert_rowid()')[0].values[0][0];
-
-  const { files, folders, folderCount } = scanDirectory(folderPath, driveId, sendProgress);
-
-  sendProgress(`Saving ${files.length} files to database…`);
-
-  const insert = db.prepare(
-    'INSERT INTO files (drive_id, name, path, size, ext, modified_at) VALUES (?, ?, ?, ?, ?, ?)'
-  );
-  for (const f of files) {
-    insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at]);
-  }
-  insert.free();
-
-  const folderInsert = db.prepare('INSERT INTO folders (drive_id, name, path) VALUES (?, ?, ?)');
-  for (const fo of folders) {
-    folderInsert.run([fo.drive_id, fo.name, fo.path]);
-  }
-  folderInsert.free();
-
-  db.run('UPDATE drives SET file_count = ?, folder_count = ?, used_size = ? WHERE id = ?',
-    [files.length, folderCount, usedSize, driveId]);
-
-  saveDB();
-  sendProgress('Done!');
-  return { ok: true, isUpdate: false, driveName, fileCount: files.length, driveId };
 });
 
+// Fixes 1, 2, 10: transaction, concurrency guard, error handling
+ipcMain.handle('scan-folder', async (event) => {
+  // Dialog can open freely; guard kicks in only once a folder is chosen
+  const dialogResult = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    message: 'Select the root folder of your external SSD'
+  });
+
+  if (dialogResult.canceled || !dialogResult.filePaths.length) return { canceled: true };
+
+  if (isScanning) return { busy: true };
+  isScanning = true;
+
+  const folderPath = dialogResult.filePaths[0];
+  const driveName = getDriveName(folderPath);
+  const volumeSerial = getDriveSerial(folderPath);
+  const sendProgress = (msg) => mainWindow.webContents.send('scan-progress', msg);
+
+  try {
+    sendProgress(`Starting scan of "${driveName}"...`);
+
+    let totalSize = 0, usedSize = 0;
+    try {
+      const stat = fs.statfsSync(folderPath);
+      totalSize = stat.bsize * stat.blocks;
+      usedSize = stat.bsize * (stat.blocks - stat.bfree);
+    } catch {}
+
+    const existStmt = db.prepare('SELECT id, volume_serial FROM drives WHERE path = ?');
+    existStmt.bind([folderPath]);
+    const existingRow = existStmt.step() ? existStmt.getAsObject() : null;
+    existStmt.free();
+
+    const existingDriveId = (existingRow && (!volumeSerial || !existingRow.volume_serial || volumeSerial === existingRow.volume_serial))
+      ? existingRow.id
+      : null;
+
+    if (existingDriveId !== null) {
+      sendProgress('Loading previous catalog…');
+      const oldStmt = db.prepare('SELECT path FROM files WHERE drive_id = ?');
+      oldStmt.bind([existingDriveId]);
+      const oldPaths = new Set();
+      while (oldStmt.step()) oldPaths.add(oldStmt.getAsObject().path);
+      oldStmt.free();
+
+      const { files, folders, folderCount } = scanDirectory(folderPath, existingDriveId, sendProgress);
+
+      sendProgress('Comparing with previous catalog…');
+      const newPaths = new Set(files.map(f => f.path));
+      const added = [...newPaths].filter(p => !oldPaths.has(p)).length;
+      const removed = [...oldPaths].filter(p => !newPaths.has(p)).length;
+
+      sendProgress(`Saving ${files.length} files to database…`);
+
+      db.run('BEGIN');
+      try {
+        db.run('DELETE FROM files WHERE drive_id = ?', [existingDriveId]);
+        db.run('DELETE FROM folders WHERE drive_id = ?', [existingDriveId]);
+
+        const insert = db.prepare('INSERT INTO files (drive_id, name, path, size, ext, modified_at) VALUES (?, ?, ?, ?, ?, ?)');
+        for (const f of files) insert.run([f.drive_id, f.name, f.path, f.size, f.ext, f.modified_at]);
+        insert.free();
+
+        const folderInsert = db.prepare('INSERT INTO folders (drive_id, name, path) VALUES (?, ?, ?)');
+        for (const fo of folders) folderInsert.run([fo.drive_id, fo.name, fo.path]);
+        folderInsert.free();
+
+        db.run(
+          'UPDATE drives SET file_count = ?, folder_count = ?, used_size = ?, total_size = ?, scanned_at = ?, volume_serial = COALESCE(volume_serial, ?), name = CASE WHEN (name IS NULL OR name = "") THEN ? ELSE name END, label = CASE WHEN (label IS NULL OR label = "") THEN ? ELSE label END WHERE id = ?',
+          [files.length, folderCount, usedSize, totalSize, new Date().toISOString(), volumeSerial, driveName, driveName, existingDriveId]
+        );
+
+        db.run('COMMIT');
+      } catch (e) {
+        db.run('ROLLBACK');
+        throw e;
+      }
+
+      saveDB();
+      sendProgress('Done!');
+      return { ok: true, isUpdate: true, driveName, fileCount: files.length, added, removed, driveId: existingDriveId };
+    }
+
+    // ── New drive — scan before INSERT so we can wrap everything in one transaction
+    const { files, folders, folderCount } = scanDirectory(folderPath, 0, sendProgress);
+
+    sendProgress(`Saving ${files.length} files to database…`);
+
+    let driveId;
+    db.run('BEGIN');
+    try {
+      db.run(
+        `INSERT INTO drives (name, label, path, total_size, used_size, file_count, folder_count, scanned_at, color, volume_serial)
+         VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+        [driveName, driveName, folderPath, totalSize, usedSize, new Date().toISOString(), randomColor(), volumeSerial]
+      );
+
+      driveId = db.exec('SELECT last_insert_rowid()')[0].values[0][0];
+
+      const insert = db.prepare('INSERT INTO files (drive_id, name, path, size, ext, modified_at) VALUES (?, ?, ?, ?, ?, ?)');
+      for (const f of files) insert.run([driveId, f.name, f.path, f.size, f.ext, f.modified_at]);
+      insert.free();
+
+      const folderInsert = db.prepare('INSERT INTO folders (drive_id, name, path) VALUES (?, ?, ?)');
+      for (const fo of folders) folderInsert.run([driveId, fo.name, fo.path]);
+      folderInsert.free();
+
+      db.run('UPDATE drives SET file_count = ?, folder_count = ?, used_size = ? WHERE id = ?',
+        [files.length, folderCount, usedSize, driveId]);
+
+      db.run('COMMIT');
+    } catch (e) {
+      db.run('ROLLBACK');
+      throw e;
+    }
+
+    saveDB();
+    sendProgress('Done!');
+    return { ok: true, isUpdate: false, driveName, fileCount: files.length, driveId };
+  } catch (e) {
+    mainWindow.webContents.send('scan-progress', 'Scan failed.');
+    return { ok: false, error: e.message };
+  } finally {
+    isScanning = false;
+  }
+});
 
 ipcMain.handle('clear-database', () => {
-  db.run('DELETE FROM files');
-  db.run('DELETE FROM folders');
-  db.run('DELETE FROM drives');
-  saveDB();
-  return { ok: true };
+  try {
+    db.run('DELETE FROM files');
+    db.run('DELETE FROM folders');
+    db.run('DELETE FROM drives');
+    saveDB();
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('update-drive-name', (_, { driveId, name }) => {
-  db.run('UPDATE drives SET name = ?, label = ? WHERE id = ?', [name, name, driveId]);
-  saveDB();
-  return { ok: true };
+  try {
+    db.run('UPDATE drives SET name = ?, label = ? WHERE id = ?', [name, name, driveId]);
+    saveDB();
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
-ipcMain.handle('get-db-path', () => DB_PATH);
+ipcMain.handle('get-db-path', () => {
+  try { return DB_PATH; } catch (e) { return null; }
+});
 
-ipcMain.handle('show-item-in-folder', (_, p) => shell.showItemInFolder(p));
+ipcMain.handle('show-item-in-folder', (_, p) => {
+  try { shell.showItemInFolder(p); } catch {}
+});
 
 ipcMain.handle('change-db-location', async (_, { copyExisting }) => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openDirectory'],
-    title: 'Choose folder for DriveVault database'
-  });
-  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory'],
+      title: 'Choose folder for DriveVault database'
+    });
+    if (result.canceled || !result.filePaths.length) return { canceled: true };
 
-  const newPath = path.join(result.filePaths[0], 'drivevault.db');
+    const newPath = path.join(result.filePaths[0], 'drivevault.db');
 
-  if (copyExisting && DB_PATH !== newPath && fs.existsSync(DB_PATH)) {
-    fs.copyFileSync(DB_PATH, newPath);
-  }
+    if (copyExisting && DB_PATH !== newPath && fs.existsSync(DB_PATH)) {
+      fs.copyFileSync(DB_PATH, newPath);
+    }
 
-  saveDbConfig(newPath);
-  loadDatabase(newPath);
-  return { ok: true, dbPath: newPath };
+    saveDbConfig(newPath);
+    loadDatabase(newPath);
+    return { ok: true, dbPath: newPath };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('import-db', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    title: 'Import DriveVault database',
-    filters: [{ name: 'SQLite Database', extensions: ['db'] }]
-  });
-  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      title: 'Import DriveVault database',
+      filters: [{ name: 'SQLite Database', extensions: ['db'] }]
+    });
+    if (result.canceled || !result.filePaths.length) return { canceled: true };
 
-  fs.copyFileSync(result.filePaths[0], DB_PATH);
-  loadDatabase(DB_PATH);
-  return { ok: true };
+    fs.copyFileSync(result.filePaths[0], DB_PATH);
+    loadDatabase(DB_PATH);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 function randomColor() {
@@ -456,92 +524,98 @@ function htmlEsc(str) {
 }
 
 ipcMain.handle('export-csv', async () => {
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Export as CSV',
-    defaultPath: `drivevault-${dateStamp()}.csv`,
-    filters: [{ name: 'CSV Files', extensions: ['csv'] }]
-  });
-  if (canceled || !filePath) return { canceled: true };
+  try {
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export as CSV',
+      defaultPath: `drivevault-${dateStamp()}.csv`,
+      filters: [{ name: 'CSV Files', extensions: ['csv'] }]
+    });
+    if (canceled || !filePath) return { canceled: true };
 
-  const stmt = db.prepare(`
-    SELECT d.label as drive_label, d.name as drive_name, d.path as drive_path,
-           f.name, f.path, f.size, f.ext, f.modified_at, f.hash
-    FROM files f
-    JOIN drives d ON f.drive_id = d.id
-    ORDER BY d.name ASC, f.path ASC
-  `);
-  const rows = [];
-  while (stmt.step()) rows.push(stmt.getAsObject());
-  stmt.free();
+    const stmt = db.prepare(`
+      SELECT d.label as drive_label, d.name as drive_name, d.path as drive_path,
+             f.name, f.path, f.size, f.ext, f.modified_at, f.hash
+      FROM files f
+      JOIN drives d ON f.drive_id = d.id
+      ORDER BY d.name ASC, f.path ASC
+    `);
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
 
-  const cols = ['drive_label', 'drive_name', 'drive_path', 'name', 'path', 'size', 'ext', 'modified_at', 'hash'];
-  const esc = v => v == null ? '' : `"${String(v).replace(/"/g, '""')}"`;
-  const lines = [cols.join(','), ...rows.map(r => cols.map(h => esc(r[h])).join(','))];
+    const cols = ['drive_label', 'drive_name', 'drive_path', 'name', 'path', 'size', 'ext', 'modified_at', 'hash'];
+    const esc = v => v == null ? '' : `"${String(v).replace(/"/g, '""')}"`;
+    const lines = [cols.join(','), ...rows.map(r => cols.map(h => esc(r[h])).join(','))];
 
-  fs.writeFileSync(filePath, lines.join('\r\n'), 'utf8');
-  return { ok: true, filePath };
+    fs.writeFileSync(filePath, lines.join('\r\n'), 'utf8');
+    return { ok: true, filePath };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('export-json', async () => {
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Export as JSON',
-    defaultPath: `drivevault-${dateStamp()}.json`,
-    filters: [{ name: 'JSON Files', extensions: ['json'] }]
-  });
-  if (canceled || !filePath) return { canceled: true };
+  try {
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export as JSON',
+      defaultPath: `drivevault-${dateStamp()}.json`,
+      filters: [{ name: 'JSON Files', extensions: ['json'] }]
+    });
+    if (canceled || !filePath) return { canceled: true };
 
-  const driveStmt = db.prepare('SELECT * FROM drives ORDER BY scanned_at DESC');
-  const drives = [];
-  while (driveStmt.step()) drives.push(driveStmt.getAsObject());
-  driveStmt.free();
+    const driveStmt = db.prepare('SELECT * FROM drives ORDER BY scanned_at DESC');
+    const drives = [];
+    while (driveStmt.step()) drives.push(driveStmt.getAsObject());
+    driveStmt.free();
 
-  for (const drive of drives) {
-    const fileStmt = db.prepare(
-      'SELECT name, path, size, ext, modified_at, hash FROM files WHERE drive_id = ? ORDER BY path ASC'
-    );
-    fileStmt.bind([drive.id]);
-    drive.files = [];
-    while (fileStmt.step()) drive.files.push(fileStmt.getAsObject());
-    fileStmt.free();
-    delete drive.id;
-  }
+    for (const drive of drives) {
+      const fileStmt = db.prepare(
+        'SELECT name, path, size, ext, modified_at, hash FROM files WHERE drive_id = ? ORDER BY path ASC'
+      );
+      fileStmt.bind([drive.id]);
+      drive.files = [];
+      while (fileStmt.step()) drive.files.push(fileStmt.getAsObject());
+      fileStmt.free();
+      delete drive.id;
+    }
 
-  const payload = {
-    exported_at: new Date().toISOString(),
-    drive_count: drives.length,
-    file_count: drives.reduce((s, d) => s + d.files.length, 0),
-    drives
-  };
+    const payload = {
+      exported_at: new Date().toISOString(),
+      drive_count: drives.length,
+      file_count: drives.reduce((s, d) => s + d.files.length, 0),
+      drives
+    };
 
-  fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf8');
-  return { ok: true, filePath };
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf8');
+    return { ok: true, filePath };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('export-html', async () => {
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Export as HTML Report',
-    defaultPath: `drivevault-report-${dateStamp()}.html`,
-    filters: [{ name: 'HTML Files', extensions: ['html'] }]
-  });
-  if (canceled || !filePath) return { canceled: true };
+  try {
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export as HTML Report',
+      defaultPath: `drivevault-report-${dateStamp()}.html`,
+      filters: [{ name: 'HTML Files', extensions: ['html'] }]
+    });
+    if (canceled || !filePath) return { canceled: true };
 
-  const driveStmt = db.prepare('SELECT * FROM drives ORDER BY scanned_at DESC');
-  const drives = [];
-  while (driveStmt.step()) drives.push(driveStmt.getAsObject());
-  driveStmt.free();
+    const driveStmt = db.prepare('SELECT * FROM drives ORDER BY scanned_at DESC');
+    const drives = [];
+    while (driveStmt.step()) drives.push(driveStmt.getAsObject());
+    driveStmt.free();
 
-  for (const drive of drives) {
-    const fileStmt = db.prepare(
-      'SELECT name, path, size, ext, modified_at FROM files WHERE drive_id = ? ORDER BY path ASC'
-    );
-    fileStmt.bind([drive.id]);
-    drive.files = [];
-    while (fileStmt.step()) drive.files.push(fileStmt.getAsObject());
-    fileStmt.free();
-  }
+    for (const drive of drives) {
+      const fileStmt = db.prepare(
+        'SELECT name, path, size, ext, modified_at FROM files WHERE drive_id = ? ORDER BY path ASC'
+      );
+      fileStmt.bind([drive.id]);
+      drive.files = [];
+      while (fileStmt.step()) drive.files.push(fileStmt.getAsObject());
+      fileStmt.free();
+    }
 
-  fs.writeFileSync(filePath, buildHtmlReport(drives), 'utf8');
-  return { ok: true, filePath };
+    fs.writeFileSync(filePath, buildHtmlReport(drives), 'utf8');
+    return { ok: true, filePath };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 function buildHtmlReport(drives) {
