@@ -15,6 +15,10 @@ function formatNum(n) {
   return Number(n || 0).toLocaleString();
 }
 
+function esc(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 function extIcon(ext) {
   const e = (ext || '').toLowerCase();
   const vid = ['mp4','mov','avi','mkv','prores','r3d','braw','mxf','wmv','webm'];
@@ -88,9 +92,9 @@ async function loadDashboard() {
             <span class="status-dot"></span>${d.connected ? 'Connected' : 'Offline'}
           </div>
         </div>
-        <div class="drive-card-name">${label}</div>
-        <div class="drive-card-path">${d.path}</div>
-        ${d.description ? `<div class="drive-card-desc">${d.description}</div>` : ''}
+        <div class="drive-card-name">${esc(label)}</div>
+        <div class="drive-card-path">${esc(d.path)}</div>
+        ${d.description ? `<div class="drive-card-desc">${esc(d.description)}</div>` : ''}
         <div class="drive-card-stats">
           <div class="drive-card-stat">
             <strong>${formatBytes(d.used_size)}${d.total_size > 0 ? ` / ${formatBytes(d.total_size)}` : ''}</strong>
@@ -127,13 +131,13 @@ async function loadDrivesView() {
         <div class="drive-row-dot" style="background: ${d.color}"></div>
         <div class="drive-row-info">
           <div class="drive-row-name">
-            ${label}
+            ${esc(label)}
             <span class="drive-status-badge ${d.connected ? 'status-connected' : 'status-offline'}">
               <span class="status-dot"></span>${d.connected ? 'Connected' : 'Offline'}
             </span>
           </div>
-          <div class="drive-row-meta">${d.path} · Scanned ${scanned}</div>
-          ${d.description ? `<div class="drive-row-desc">${d.description}</div>` : ''}
+          <div class="drive-row-meta">${esc(d.path)} · Scanned ${scanned}</div>
+          ${d.description ? `<div class="drive-row-desc">${esc(d.description)}</div>` : ''}
         </div>
         <div class="drive-row-stats">
           <div class="drive-row-stat">
@@ -149,7 +153,7 @@ async function loadDrivesView() {
           ${d.connected ? `<button class="btn-ghost" onclick="rescanDrive(${d.id})">Rescan</button>` : ''}
           <button class="btn-ghost" onclick="openEditModal(${d.id})">Edit</button>
           <button class="btn-ghost" onclick="openDriveModal(${d.id})">Browse</button>
-          <button class="btn-ghost danger" onclick="deleteDrive(${d.id}, '${label.replace(/'/g, "\\'")}')">Remove</button>
+          <button class="btn-ghost danger" data-delete-id="${d.id}" data-delete-name="${esc(label)}">Remove</button>
         </div>
       </div>
     `;
@@ -161,6 +165,11 @@ async function deleteDrive(id, name) {
   await window.api.deleteDrive(id);
   await Promise.all([loadDashboard(), loadDrivesView()]);
 }
+
+document.getElementById('drives-list').addEventListener('click', e => {
+  const btn = e.target.closest('[data-delete-id]');
+  if (btn) deleteDrive(Number(btn.dataset.deleteId), btn.dataset.deleteName);
+});
 
 async function rescanDrive(driveId) {
   resetScanModal();
@@ -200,7 +209,7 @@ async function openDriveModal(driveId) {
     <span><strong>${formatNum(drive.file_count)}</strong> files</span>
     <span><strong>${formatNum(drive.folder_count)}</strong> folders</span>
     <span><strong>${formatBytes(drive.used_size)}${drive.total_size > 0 ? ` / ${formatBytes(drive.total_size)}` : ''}</strong> used</span>
-    <span>Path: <strong>${drive.path}</strong></span>
+    <span>Path: <strong>${esc(drive.path)}</strong></span>
   `;
   const descEl = document.getElementById('drive-modal-desc');
   if (drive.description) {
@@ -258,7 +267,7 @@ function renderFileTree(files, rootPath, connected, truncated = false) {
         <div class="tree-folder">
           <div class="tree-folder-name" onclick="this.parentElement.querySelector('.tree-folder-children').classList.toggle('hidden')">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text3)"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-            ${key}
+            ${esc(key)}
             <span style="color:var(--text3);font-size:12px;font-weight:400;margin-left:4px">${fileCount} files</span>
           </div>
           <div class="tree-folder-children hidden">
@@ -273,14 +282,14 @@ function renderFileTree(files, rootPath, connected, truncated = false) {
     for (const f of ffiles.sort((a, b) => a.name.localeCompare(b.name))) {
       const { cls } = extIcon(f.ext);
       const revealBtn = connected && f.path
-        ? `<button class="tree-file-reveal" title="Show in Explorer" data-path="${f.path.replace(/"/g, '&quot;')}" onclick="event.stopPropagation(); revealFile(this)">
+        ? `<button class="tree-file-reveal" title="Show in Explorer" data-path="${esc(f.path)}" onclick="event.stopPropagation(); revealFile(this)">
              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
            </button>`
         : '';
       html += `
         <div class="tree-file">
-          <span class="${cls}" style="font-size:13px;width:20px;text-align:center">${f.ext || '?'}</span>
-          <span>${f.name}</span>
+          <span class="${cls}" style="font-size:13px;width:20px;text-align:center">${esc(f.ext || '?')}</span>
+          <span>${esc(f.name)}</span>
           <span class="tree-file-size">${formatBytes(f.size)}</span>
           ${revealBtn}
         </div>
@@ -392,12 +401,12 @@ async function runSearch(query) {
   const container = document.getElementById('search-results');
 
   if (!files.length && !folders.length) {
-    container.innerHTML = `<p style="color:var(--text3);padding:16px 0">No results for "${query}"</p>`;
+    container.innerHTML = `<p style="color:var(--text3);padding:16px 0">No results for "${esc(query)}"</p>`;
     return;
   }
 
   const revealBtn = (path) =>
-    `<button class="search-result-reveal" title="Show in Explorer" data-path="${path.replace(/"/g, '&quot;')}" onclick="event.stopPropagation(); revealFile(this)">
+    `<button class="search-result-reveal" title="Show in Explorer" data-path="${esc(path)}" onclick="event.stopPropagation(); revealFile(this)">
        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
      </button>`;
 
@@ -406,16 +415,16 @@ async function runSearch(query) {
   if (folders.length) {
     html += `<div class="search-section-label">Folders <span class="search-count">${folders.length}</span></div>`;
     html += folders.map((fo, i) => `
-      <div class="search-result search-result-folder" onclick="toggleFolderContents(${i}, ${fo.drive_id}, ${JSON.stringify(fo.path).replace(/</g, '\\u003c')})">
+      <div class="search-result search-result-folder" data-folder-idx="${i}" data-drive-id="${fo.drive_id}" data-folder-path="${esc(fo.path)}">
         <div class="search-result-icon search-icon-folder">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
         </div>
         <div class="search-result-info">
-          <div class="search-result-name">${fo.name}</div>
-          <div class="search-result-path">${fo.path}</div>
+          <div class="search-result-name">${esc(fo.name)}</div>
+          <div class="search-result-path">${esc(fo.path)}</div>
           <div class="drive-chip">
             <div class="drive-chip-dot" style="background:${fo.drive_color || '#666'}"></div>
-            ${fo.drive_label || fo.drive_name}
+            ${esc(fo.drive_label || fo.drive_name)}
           </div>
         </div>
         ${connectedDrives.has(fo.drive_id) ? revealBtn(fo.path) : ''}
@@ -433,13 +442,13 @@ async function runSearch(query) {
       const { cls } = extIcon(f.ext);
       return `
         <div class="search-result">
-          <div class="search-result-icon ${cls}">${f.ext || '?'}</div>
+          <div class="search-result-icon ${cls}">${esc(f.ext || '?')}</div>
           <div class="search-result-info">
-            <div class="search-result-name">${f.name}</div>
-            <div class="search-result-path">${f.path}</div>
+            <div class="search-result-name">${esc(f.name)}</div>
+            <div class="search-result-path">${esc(f.path)}</div>
             <div class="drive-chip">
               <div class="drive-chip-dot" style="background:${f.drive_color || '#666'}"></div>
-              ${f.drive_label || f.drive_name}
+              ${esc(f.drive_label || f.drive_name)}
             </div>
           </div>
           <div class="search-result-meta">${formatBytes(f.size)}</div>
@@ -451,6 +460,17 @@ async function runSearch(query) {
 
   container.innerHTML = html;
 }
+
+document.getElementById('search-results').addEventListener('click', e => {
+  const row = e.target.closest('.search-result-folder');
+  if (row && !e.target.closest('.search-result-reveal')) {
+    toggleFolderContents(
+      Number(row.dataset.folderIdx),
+      Number(row.dataset.driveId),
+      row.dataset.folderPath
+    );
+  }
+});
 
 async function toggleFolderContents(index, driveId, folderPath) {
   const contentsEl = document.getElementById(`folder-contents-${index}`);
@@ -478,9 +498,9 @@ async function toggleFolderContents(index, driveId, folderPath) {
     const { cls } = extIcon(f.ext);
     return `
       <div class="folder-contents-file">
-        <span class="search-result-icon ${cls}" style="font-size:11px;width:26px;height:26px;flex-shrink:0">${f.ext || '?'}</span>
-        <span class="folder-contents-name">${f.name}</span>
-        <span class="folder-contents-path">${f.path}</span>
+        <span class="search-result-icon ${cls}" style="font-size:11px;width:26px;height:26px;flex-shrink:0">${esc(f.ext || '?')}</span>
+        <span class="folder-contents-name">${esc(f.name)}</span>
+        <span class="folder-contents-path">${esc(f.path)}</span>
         <span class="folder-contents-size">${formatBytes(f.size)}</span>
       </div>
     `;
@@ -573,13 +593,13 @@ function showScanResultSummary(result) {
          ${result.removed > 0 ? `<span class="scan-stat-removed">-${formatNum(result.removed)} removed</span>` : ''}`;
     resultEl.innerHTML = `
       <div class="scan-result-icon">✓</div>
-      <div class="scan-result-title">"${result.driveName}" refreshed</div>
+      <div class="scan-result-title">"${esc(result.driveName)}" refreshed</div>
       <div class="scan-result-stats">${changeLine}<span class="scan-stat-total">${formatNum(result.fileCount)} files total</span></div>
     `;
   } else {
     resultEl.innerHTML = `
       <div class="scan-result-icon">✓</div>
-      <div class="scan-result-title">"${result.driveName}" indexed</div>
+      <div class="scan-result-title">"${esc(result.driveName)}" indexed</div>
       <div class="scan-result-stats"><span class="scan-stat-total">${formatNum(result.fileCount)} files catalogued</span></div>
     `;
   }
@@ -637,7 +657,7 @@ document.getElementById('scan-done-btn').addEventListener('click', async () => {
 // ── Connection status polling ─────────────────────────────────────────────────
 
 async function pollDriveStatus() {
-  const drives = await window.api.getDrives();
+  const drives = await window.api.getDrivesStatus();
   drives.forEach(d => {
     const connected = !!d.connected;
     const cls = `drive-status-badge ${connected ? 'status-connected' : 'status-offline'}`;

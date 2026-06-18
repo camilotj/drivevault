@@ -64,6 +64,7 @@ function runMigrations() {
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_files_drive ON files(drive_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_files_name ON files(name)`);
 
   db.run(`
     CREATE TABLE IF NOT EXISTS folders (
@@ -75,6 +76,7 @@ function runMigrations() {
     )
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_folders_drive ON folders(drive_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_folders_name ON folders(name)`);
 }
 
 function loadDatabase(dbPath) {
@@ -719,6 +721,22 @@ function buildHtmlReport(drives) {
 </body>
 </html>`;
 }
+
+// Lightweight poll endpoint — fs.existsSync only, no execSync serial check.
+// Used by the renderer's 10-second status ticker so the main-process event
+// loop is never blocked by shell invocations during background polling.
+ipcMain.handle('get-drives-status', () => {
+  try {
+    const stmt = db.prepare('SELECT id, path FROM drives');
+    const result = [];
+    while (stmt.step()) {
+      const d = stmt.getAsObject();
+      result.push({ id: d.id, connected: fs.existsSync(d.path) ? 1 : 0 });
+    }
+    stmt.free();
+    return result;
+  } catch { return []; }
+});
 
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 

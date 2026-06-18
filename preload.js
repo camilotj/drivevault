@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   getDrives: () => ipcRenderer.invoke('get-drives'),
+  getDrivesStatus: () => ipcRenderer.invoke('get-drives-status'),
   getDrive: (driveId) => ipcRenderer.invoke('get-drive', driveId),
   getDriveFiles: (driveId) => ipcRenderer.invoke('get-drive-files', driveId),
   deleteDrive: (driveId) => ipcRenderer.invoke('delete-drive', driveId),
